@@ -35,6 +35,31 @@ Muốn tắt app thì đóng cửa sổ Terminal đi kèm.
 
 Lần đầu bấm, macOS có thể chặn vì file tải từ nơi khác. Khi đó: chuột phải vào file → **Open** → **Open**.
 
+## Kết nối YouTube: đăng tự động và hẹn lịch
+
+Làm 1 lần (chi tiết có trong tab **📺 YouTube** của giao diện):
+
+1. [Google Cloud Console](https://console.cloud.google.com/): tạo project, bật **YouTube Data API v3**.
+2. **OAuth consent screen**: chọn External, thêm email của bạn vào Test users, rồi bấm **Publish app** (để token không hết hạn sau 7 ngày).
+3. **Credentials → OAuth client ID → Desktop app**, tải file JSON về, rồi kéo vào tab YouTube (hoặc lưu thành `credentials/client_secret.json`).
+4. Bấm **🔑 Đăng nhập tài khoản YouTube**. Đăng nhập được nhiều tài khoản.
+
+⚠️ Project chưa qua [kiểm duyệt YouTube API](https://support.google.com/youtube/contact/yt_api_form) thì video đăng qua API **bị khoá ở chế độ Riêng tư**. Gửi form kiểm duyệt (miễn phí, mất vài tuần) để đăng công khai và hẹn giờ tự động.
+
+Tính năng:
+- **Hẹn lịch:** đặt khung giờ mỗi ngày (vd `08:00, 20:00`). Mỗi video tự lấy khung giờ trống tiếp theo, YouTube tự công khai đúng giờ.
+- **Gemini viết lại tiêu đề:** nút ✍️ trong Thư viện video. Tracklist và ghi công được giữ nguyên. Có ô ghi chú phong cách ở tab YouTube.
+- **Tự động hàng loạt:** Gemini nghĩ N chủ đề cảm xúc, app làm N video ambient và hẹn đăng vào N khung giờ liên tiếp.
+- Thumbnail được đặt tự động (kênh cần xác minh số điện thoại). Tự khai báo "nội dung AI" khi dùng ảnh Gemini. Lịch sử đăng lưu trong `data/uploads.json`.
+
+```bash
+./pianotube.sh youtube login
+./pianotube.sh ambient --mood "it's okay to rest" --minutes 50 --upload           # làm xong tự đăng theo lịch
+./pianotube.sh upload 2026-09-23_1518_when_the_world_feels_too_loud --mode at --at "2026-09-25 20:00"
+./pianotube.sh retitle 2026-09-23_1518_when_the_world_feels_too_loud --note "ngắn hơn"
+./pianotube.sh batch --count 7 --minutes 50 --upload                               # 1 tuần video, mỗi tối 1 video
+```
+
 ## Dùng bằng dòng lệnh
 
 ### Playlist piano ambient nhẹ nhàng (nhạc tự sáng tác), khuyên dùng

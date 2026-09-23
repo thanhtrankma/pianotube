@@ -2,3 +2,5 @@
 .env
 output/
 assets/soundfonts/
+credentials/
+data/

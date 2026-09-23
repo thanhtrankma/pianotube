@@ -110,3 +110,61 @@ def metadata(brief: str, ambient: bool = False) -> dict | None:
     except Exception as e:
         print(f"  ! Gemini không viết được metadata ({e}); dùng mẫu có sẵn.")
     return None
+
+
+REWRITE_SCHEMA = {
+    "type": "object",
+    "properties": {k: METADATA_SCHEMA["properties"][k] for k in ("title", "intro", "tags", "hashtags")},
+    "required": ["title", "intro", "tags", "hashtags"],
+}
+
+
+def rewrite(meta: dict, ambient: bool, note: str = "") -> dict | None:
+    """Viết lại tiêu đề + đoạn giới thiệu + tag cho video đã có (giữ nguyên tracklist, ghi công)."""
+    if not available():
+        return None
+    from google.genai import types
+    brief = (f"Rewrite fresh metadata for this existing video. Make the title clearly different from the old one.\n"
+             f"Old title: {meta.get('title', '')}\n"
+             f"Mood/theme: {meta.get('mood', '')}\nScene: {meta.get('scene', '')}\n"
+             f"Tracklist / pieces:\n{meta.get('parts', {}).get('tracklist', '') or meta.get('description', '')[:1500]}")
+    if note:
+        brief += f"\nExtra instructions from the channel owner: {note}"
+    try:
+        resp = client().models.generate_content(
+            model=config.GEMINI_TEXT_MODEL, contents=brief,
+            config=types.GenerateContentConfig(
+                system_instruction=AMBIENT_SYSTEM if ambient else SYSTEM,
+                response_mime_type="application/json", response_schema=REWRITE_SCHEMA, temperature=1.0))
+        return json.loads(resp.text)
+    except Exception as e:
+        print(f"  ! Gemini lỗi: {e}")
+    return None
+
+
+IDEAS_SCHEMA = {"type": "object",
+                "properties": {"moods": {"type": "array", "items": {"type": "string"}}},
+                "required": ["moods"]}
+
+
+def ideas(n: int, note: str = "", avoid: list | None = None) -> list:
+    """Nghĩ n chủ đề cảm xúc khác nhau cho các video ambient sắp làm."""
+    if not available():
+        return []
+    from google.genai import types
+    brief = (f"Give {n} different short feelings/situations (4-9 words, lowercase, English) that a listener "
+             f"might be going through, each a theme for one gentle piano playlist video. "
+             f"Vary them: tired, lonely, healing, hopeful, nostalgic, anxious, grateful, late-night, rainy days...")
+    if avoid:
+        brief += "\nDo not repeat or closely paraphrase these recent ones:\n- " + "\n- ".join(avoid[-40:])
+    if note:
+        brief += f"\nChannel owner notes: {note}"
+    try:
+        resp = client().models.generate_content(
+            model=config.GEMINI_TEXT_MODEL, contents=brief,
+            config=types.GenerateContentConfig(response_mime_type="application/json",
+                                               response_schema=IDEAS_SCHEMA, temperature=1.1))
+        return json.loads(resp.text)["moods"][:n]
+    except Exception as e:
+        print(f"  ! Gemini lỗi: {e}")
+    return []

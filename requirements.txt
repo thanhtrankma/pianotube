@@ -4,3 +4,5 @@ pretty_midi
 google-genai
 python-dotenv
 gradio
+google-api-python-client
+google-auth-oauthlib

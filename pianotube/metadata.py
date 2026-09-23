@@ -29,23 +29,45 @@ def credits(pieces: list) -> str:
     return "\n".join(lines)
 
 
+def join_description(intro: str, tracklist: str, credits_text: str, hashtags: list) -> str:
+    parts = [intro.strip(), tracklist, credits_text, " ".join(hashtags)]
+    return "\n\n".join(p for p in parts if p)[:5000]
+
+
 def build(ai: dict, pieces: list, chapters: list | None) -> dict:
-    parts = [ai["intro"].strip()]
+    tracklist = ""
     if chapters and len(chapters) >= 3:
         # YouTube cần chương đầu ở 00:00 và ít nhất 3 chương.
-        parts.append("Tracklist:\n" + "\n".join(
-            f"{ts(t)} {label(p)}" for t, p in chapters))
-    parts.append(credits(pieces))
-    parts.append(" ".join(ai["hashtags"]))
-    desc = "\n\n".join(parts)
+        tracklist = "Tracklist:\n" + "\n".join(f"{ts(t)} {label(p)}" for t, p in chapters)
+    credits_text = credits(pieces)
     return {
         "title": ai["title"][:100],
-        "description": desc[:5000],
+        "description": join_description(ai["intro"], tracklist, credits_text, ai["hashtags"]),
         "tags": ai["tags"],
         "thumbnail_text": ai["thumbnail_text"],
         "category": "Music",
         "made_for_kids": False,
+        # Lưu từng phần để Gemini viết lại tiêu đề/giới thiệu mà giữ nguyên tracklist + ghi công.
+        "parts": {"intro": ai["intro"].strip(), "tracklist": tracklist,
+                  "credits": credits_text, "hashtags": ai["hashtags"]},
     }
+
+
+def split_description(desc: str) -> dict:
+    """Tách mô tả cũ (chưa có "parts") thành các phần."""
+    blocks = desc.split("\n\n")
+    parts = {"intro": [], "tracklist": "", "credits": "", "hashtags": []}
+    for b in blocks:
+        if b.startswith("Tracklist:"):
+            parts["tracklist"] = b
+        elif b.startswith(("Music credits:", "All music is original")):
+            parts["credits"] = b
+        elif b.strip().startswith("#") and all(w.startswith("#") for w in b.split()):
+            parts["hashtags"] = b.split()
+        else:
+            parts["intro"].append(b)
+    parts["intro"] = "\n\n".join(parts["intro"])
+    return parts
 
 
 def write(meta: dict, folder: Path):

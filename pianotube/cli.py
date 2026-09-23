@@ -91,6 +91,20 @@ def fallback_meta(kind: str, pieces: list, theme: str | None) -> dict:
             "hashtags": ["#piano", "#classicalmusic", "#relaxingmusic"]}
 
 
+def finish(folder: Path, args) -> Path:
+    """In dòng kết thúc (giao diện đọc dòng này) và đăng YouTube nếu có --upload."""
+    print(f"✓ Xong: {folder}", flush=True)
+    if getattr(args, "upload", False):
+        from . import publish
+        try:
+            rec = publish.publish(folder, mode=args.upload_mode, at=args.upload_at)
+            print(f"📤 Đã đăng: {rec['url']}" + (f" (công khai lúc {rec['publish_local']})"
+                                                if rec.get("publish_local") else f" ({rec['privacy']})"))
+        except Exception as e:
+            print(f"✗ Đăng YouTube lỗi: {e}")
+    return folder
+
+
 def cmd_library(args):
     if args.action == "add":
         e = library.add(Path(args.file), args.title, args.composer, args.license, args.source)
@@ -122,6 +136,7 @@ def cmd_falling(args):
         f"Video type: falling-notes piano visualization (Synthesia style), right hand blue, left hand orange.\n"
         f"Piece: {item['title']}\nComposer: {item['composer']}") or fallback_meta("falling", [item], None)
     meta = metadata.build(ai, [item], None)
+    meta.update(kind="falling", mood=f"{item['composer']} – {item['title']}", ai_image=bg_img is not None)
     metadata.write(meta, folder)
 
     frame = folder / "frame.png"
@@ -132,7 +147,7 @@ def cmd_falling(args):
                        top=True)
     frame.unlink()
     library.mark_used([item["id"]])
-    print(f"✓ Xong: {folder}")
+    return finish(folder, args)
 
 
 def cmd_relax(args):
@@ -163,6 +178,7 @@ def cmd_relax(args):
         bg_img = gemini.image(
             f"Cozy, calm scene for '{args.theme}'. Painterly lo-fi illustration, warm soft light, "
             "gentle atmosphere, no text, no logos, no people's faces, cinematic 16:9.")
+    ai_image = bg_img is not None
     bg_img = bg_img or imaging.gradient_background()
     bg_img.save(folder / "background.png")
 
@@ -180,10 +196,11 @@ def cmd_relax(args):
         f"Video type: long relaxing classical piano mix, {seconds / 3600:.1f} hours.\n"
         f"Theme / use-case: {args.theme}\nPieces:\n{names}") or fallback_meta("relax", pieces, args.theme)
     meta = metadata.build(ai, pieces, list(zip(starts, pieces)))
+    meta.update(kind="relax", mood=args.theme, ai_image=ai_image)
     metadata.write(meta, folder)
     imaging.thumbnail(bg_img, ai["thumbnail_text"], "Relaxing Classical Piano", folder / "thumbnail.jpg")
     library.mark_used([p["id"] for p in pieces])
-    print(f"✓ Xong: {folder}")
+    return finish(folder, args)
 
 
 def cmd_ambient(args):
@@ -224,6 +241,7 @@ def cmd_ambient(args):
     if not args.no_ai_image:
         print(f"  🎨 Gemini tạo ảnh: {scene}")
         bg_img = gemini.image(ambient_image_prompt(scene))
+    ai_image = bg_img is not None
     bg_img = bg_img or imaging.gradient_background((18, 22, 28), (46, 52, 58))
     bg_img.save(folder / "background.png")
 
@@ -255,14 +273,72 @@ def cmd_ambient(args):
     pieces = [{"id": f"t{i}", "title": f"{i + 1:02d}. {n}", "composer": "", "original": True}
               for i, n in enumerate(names)]
     meta = metadata.build(ai, pieces, list(zip(starts, pieces)))
-    meta["seed"] = base_seed
-    meta["scene"] = scene
+    meta.update(kind="ambient", mood=args.mood, seed=base_seed, scene=scene, ai_image=ai_image)
     metadata.write(meta, folder)
     if args.thumb_text:
         imaging.thumbnail(bg_img, ai["thumbnail_text"], "piano playlist", folder / "thumbnail.jpg")
     else:
         imaging.fit_cover(bg_img, (1280, 720)).save(folder / "thumbnail.jpg", quality=92)
-    print(f"✓ Xong: {folder}")
+    return finish(folder, args)
+
+
+def cmd_youtube(args):
+    from . import settings, youtube
+    if args.action == "login":
+        youtube.login()
+    else:
+        active = youtube.active_account()
+        for label, acc in youtube.accounts():
+            print(("* " if acc == active else "  ") + label)
+        if not youtube.accounts():
+            print("Chưa có tài khoản. Chạy: pianotube youtube login")
+    print(f"Lịch đăng: {settings.load()['slots']} (chế độ {settings.load()['mode']})")
+
+
+def cmd_upload(args):
+    from . import publish
+    rec = publish.publish(args.folder, mode=args.mode, at=args.at)
+    print(f"📤 {rec['url']}")
+
+
+def cmd_retitle(args):
+    from . import publish
+    meta = publish.retitle(args.folder, args.note)
+    print(meta["description"])
+
+
+def cmd_batch(args):
+    """Tự động hàng loạt: Gemini nghĩ chủ đề → làm video ambient → đăng hẹn lịch."""
+    import json
+    from . import publish, settings
+    recent = []
+    for d in sorted(config.OUTPUT_DIR.glob("*/metadata.json"))[-60:]:
+        try:
+            recent.append(json.loads(d.read_text()).get("mood", ""))
+        except Exception:
+            pass
+    moods = gemini.ideas(args.count, settings.load()["title_note"], [m for m in recent if m])
+    fallback = ["when the world feels too loud", "it's okay to rest today", "for the nights you can't sleep",
+                "missing a place that no longer exists", "you are doing better than you think",
+                "a quiet morning after a hard week", "when you just need to breathe"]
+    while len(moods) < args.count:
+        moods.append(random.choice(fallback))
+    print(f"🧠 Chủ đề: " + " | ".join(moods), flush=True)
+    for i, mood in enumerate(moods, 1):
+        print(f"━━ Video {i}/{args.count}: {mood}", flush=True)
+        sub_args = argparse.Namespace(
+            mood=mood, minutes=args.minutes, scene=None, seed=None, xfade=4.0, effect=args.effect,
+            visualizer=False, no_pad=False, thumb_text=False, no_ai_image=args.no_ai_image,
+            upload=args.upload, upload_mode=args.upload_mode, upload_at=None)
+        cmd_ambient(sub_args)
+    print("🏁 Hoàn tất hàng loạt.")
+
+
+def add_upload_args(p):
+    p.add_argument("--upload", action="store_true", help="đăng YouTube ngay khi làm xong")
+    p.add_argument("--upload-mode", choices=["slot", "private", "unlisted", "public", "at"],
+                   help="mặc định theo cài đặt (slot = khung giờ trống tiếp theo)")
+    p.add_argument("--upload-at", help='giờ công khai khi --upload-mode at, vd "2026-09-25 20:00"')
 
 
 def main():
@@ -281,6 +357,7 @@ def main():
     fall = sub.add_parser("falling", help="video phím đàn rơi cho 1 bài")
     fall.add_argument("piece", help="id trong thư viện hoặc tên file .mid")
     fall.add_argument("--no-ai-image", action="store_true", help="dùng nền gradient, không gọi Gemini")
+    add_upload_args(fall)
     fall.set_defaults(func=cmd_falling)
 
     rel = sub.add_parser("relax", help="video nhạc thư giãn dài")
@@ -292,6 +369,7 @@ def main():
     rel.add_argument("--effect", choices=["dust", "grain", "none"], default="dust")
     rel.add_argument("--bright", action="store_true", help="giữ tiếng đàn gốc, không làm mềm")
     rel.add_argument("--no-ai-image", action="store_true")
+    add_upload_args(rel)
     rel.set_defaults(func=cmd_relax)
 
     amb = sub.add_parser("ambient", help="playlist piano ambient nhẹ nhàng, nhạc tự sáng tác")
@@ -306,7 +384,31 @@ def main():
     amb.add_argument("--no-pad", action="store_true", help="bỏ lớp pad nền")
     amb.add_argument("--thumb-text", action="store_true", help="thêm chữ lên thumbnail")
     amb.add_argument("--no-ai-image", action="store_true")
+    add_upload_args(amb)
     amb.set_defaults(func=cmd_ambient)
+
+    yt = sub.add_parser("youtube", help="đăng nhập / xem tài khoản YouTube")
+    yt.add_argument("action", choices=["login", "accounts"])
+    yt.set_defaults(func=cmd_youtube)
+
+    up = sub.add_parser("upload", help="đăng một video đã làm")
+    up.add_argument("folder", help="tên thư mục trong output/")
+    up.add_argument("--mode", choices=["slot", "private", "unlisted", "public", "at"])
+    up.add_argument("--at", help='"2026-09-25 20:00" (giờ máy) khi --mode at')
+    up.set_defaults(func=cmd_upload)
+
+    rt = sub.add_parser("retitle", help="Gemini viết lại tiêu đề/mô tả/tag")
+    rt.add_argument("folder")
+    rt.add_argument("--note", help="yêu cầu thêm, vd 'ngắn hơn, nói về mưa'")
+    rt.set_defaults(func=cmd_retitle)
+
+    bt = sub.add_parser("batch", help="tự động làm nhiều video ambient + hẹn lịch đăng")
+    bt.add_argument("--count", type=int, default=3)
+    bt.add_argument("--minutes", type=float, default=50)
+    bt.add_argument("--effect", choices=["grain", "dust", "none"], default="grain")
+    bt.add_argument("--no-ai-image", action="store_true")
+    add_upload_args(bt)
+    bt.set_defaults(func=cmd_batch)
 
     args = ap.parse_args()
     if args.cmd == "library" and args.action == "add" and not (args.file and args.title and args.composer):
