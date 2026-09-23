@@ -1,0 +1,47 @@
+[
+  {
+    "id": "erik_satie_gymnopedie_no_1",
+    "file": "erik_satie_gymnopedie_no_1.mid",
+    "title": "Gymnopédie No. 1",
+    "composer": "Erik Satie",
+    "license": "Public Domain",
+    "source": "https://www.mutopiaproject.org/ftp/SatieE/gymnopedie_1/gymnopedie_1.mid",
+    "used": 3
+  },
+  {
+    "id": "erik_satie_gnossienne_no_1",
+    "file": "erik_satie_gnossienne_no_1.mid",
+    "title": "Gnossienne No. 1",
+    "composer": "Erik Satie",
+    "license": "CC BY-SA 4.0",
+    "source": "https://www.mutopiaproject.org/ftp/SatieE/Gnossienne/no_1/no_1.mid",
+    "used": 1
+  },
+  {
+    "id": "frederic_chopin_nocturne_op_9_no_2",
+    "file": "frederic_chopin_nocturne_op_9_no_2.mid",
+    "title": "Nocturne Op. 9 No. 2",
+    "composer": "Frédéric Chopin",
+    "license": "CC BY-SA 3.0",
+    "source": "https://www.mutopiaproject.org/ftp/ChopinFF/O9/chopin_nocturne_op9_n2/chopin_nocturne_op9_n2.mid",
+    "used": 1
+  },
+  {
+    "id": "claude_debussy_arabesque_no_1",
+    "file": "claude_debussy_arabesque_no_1.mid",
+    "title": "Arabesque No. 1",
+    "composer": "Claude Debussy",
+    "license": "Public Domain",
+    "source": "https://www.mutopiaproject.org/ftp/DebussyC/L66/debussy_Arabesque_1/debussy_Arabesque_1.mid",
+    "used": 2
+  },
+  {
+    "id": "claude_debussy_clair_de_lune",
+    "file": "claude_debussy_clair_de_lune.mid",
+    "title": "Clair de Lune",
+    "composer": "Claude Debussy",
+    "license": "Public Domain",
+    "source": "https://www.mutopiaproject.org/ftp/DebussyC/L75/debussy_Ste_Bergamesq_Clair/debussy_Ste_Bergamesq_Clair.mid",
+    "used": 2
+  }
+]

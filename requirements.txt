@@ -1,0 +1,6 @@
+numpy
+pillow
+pretty_midi
+google-genai
+python-dotenv
+gradio
