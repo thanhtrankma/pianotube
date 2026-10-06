@@ -116,11 +116,20 @@ def service(account_id: str | None = None, log=print):
     path = _token_path(account_id)
     creds = Credentials.from_authorized_user_file(str(path), SCOPES) if path.exists() else None
     if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-        except Exception as e:
-            log(f"⚠️ Token hết hạn ({e}), đăng nhập lại…")
-            creds = None
+        from google.auth.exceptions import RefreshError
+        for attempt in range(4):
+            try:
+                creds.refresh(Request())
+                break
+            except RefreshError as e:          # token bị thu hồi/hết hạn thật → phải đăng nhập lại
+                log(f"⚠️ Token hết hạn ({e}), đăng nhập lại…")
+                creds = None
+                break
+            except Exception as e:             # mất mạng: đợi rồi thử lại, không mở trình duyệt
+                if attempt == 3:
+                    raise
+                log(f"⚠️ Chưa kết nối được Google ({e}), thử lại sau {30 * (attempt + 1)} giây…")
+                time.sleep(30 * (attempt + 1))
     if not creds or not creds.valid:
         creds = _oauth(log)
     path.write_text(creds.to_json())
@@ -192,6 +201,7 @@ def upload(folder: Path, privacy: str = "private", publish_at: datetime | None =
            progress=None, log=print) -> dict:
     """Đăng video trong thư mục output. privacy: private | unlisted | public.
     Nếu có publish_at: video để riêng tư và YouTube tự công khai đúng giờ đó."""
+    import httplib2
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
 
@@ -237,7 +247,7 @@ def upload(folder: Path, privacy: str = "private", publish_at: datetime | None =
                 time.sleep(5 * (MAX_RETRIES - retries))
                 continue
             raise
-        except OSError as e:
+        except (OSError, httplib2.HttpLib2Error) as e:   # mất mạng, máy ngủ dậy chưa có DNS…
             if retries:
                 retries -= 1
                 log(f"⚠️ Mất kết nối ({e}), thử lại… (còn {retries} lần)")
