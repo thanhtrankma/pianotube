@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PT=".venv/bin/python -m pianotube"
+mkdir -p assets/soundfonts midi
 
 SF_URL="https://freepats.zenvoid.org/Piano/SalamanderGrandPiano/SalamanderGrandPiano-SF2-V3+20200602.tar.xz"
 if [ -z "$(find assets/soundfonts -name "*.sf2" -print -quit)" ]; then
@@ -19,9 +20,11 @@ add() {  # url title composer license
   $PT library add "$f" --title "$2" --composer "$3" --license "$4" --source "$1"
   rm "$f"
 }
+if [ -z "$(find midi -name "*.mid" -print -quit)" ]; then
 add "$M/SatieE/gymnopedie_1/gymnopedie_1.mid" "Gymnopédie No. 1" "Erik Satie" "Public Domain"
 add "$M/SatieE/Gnossienne/no_1/no_1.mid" "Gnossienne No. 1" "Erik Satie" "CC BY-SA 4.0"
 add "$M/ChopinFF/O9/chopin_nocturne_op9_n2/chopin_nocturne_op9_n2.mid" "Nocturne Op. 9 No. 2" "Frédéric Chopin" "CC BY-SA 3.0"
 add "$M/DebussyC/L66/debussy_Arabesque_1/debussy_Arabesque_1.mid" "Arabesque No. 1" "Claude Debussy" "Public Domain"
 add "$M/DebussyC/L75/debussy_Ste_Bergamesq_Clair/debussy_Ste_Bergamesq_Clair.mid" "Clair de Lune" "Claude Debussy" "Public Domain"
+fi
 echo "Xong."

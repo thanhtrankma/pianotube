@@ -25,8 +25,8 @@ def duration(path: Path) -> float:
 
 
 # Tiếng vang phòng lớn cho chất "ambient"; mặc định của FluidSynth khá khô.
-SOFT_REVERB = ["-o", "synth.reverb.room-size=0.92", "-o", "synth.reverb.damp=0.35",
-               "-o", "synth.reverb.width=1.0", "-o", "synth.reverb.level=0.85"]
+SOFT_REVERB = ["-o", "synth.reverb.room-size=0.75", "-o", "synth.reverb.damp=0.5",
+               "-o", "synth.reverb.width=1.0", "-o", "synth.reverb.level=0.55"]
 
 
 def render_midi(midi: Path, wav: Path, soft: bool = False) -> Path:
@@ -74,10 +74,10 @@ def pad(chords: list, seconds: float, dst: Path, level: float = 0.05) -> Path:
         env[:k] = np.linspace(0, 1, k) ** 2
         env[-k:] = np.linspace(1, 0, k) ** 2
         for p in voice[1:4]:                                  # bỏ nốt bass cho đỡ đục
-            f = 440.0 * 2 ** ((p + 12 - 69) / 12)
+            f = 440.0 * 2 ** ((p - 69) / 12)                  # cùng quãng với tay trái, không đẩy lên cao
             for ch, cents in ((0, -4), (1, 4)):               # lệch nhẹ 2 kênh cho rộng
                 ff = f * 2 ** (cents / 1200)
-                wave_ = np.sin(2 * np.pi * ff * tt) + 0.25 * np.sin(4 * np.pi * ff * tt)
+                wave_ = np.sin(2 * np.pi * ff * tt) + 0.12 * np.sin(4 * np.pi * ff * tt)
                 out[a:b, ch] += (wave_ * env).astype(np.float32)
     peak = np.abs(out).max() or 1
     out = out / peak * level
@@ -91,9 +91,11 @@ def pad(chords: list, seconds: float, dst: Path, level: float = 0.05) -> Path:
 
 def warm(piano: Path, dst: Path, pad_wav: Path | None = None) -> Path:
     """Làm tiếng đàn ấm và mềm: cắt bớt tần số chói, trộn lớp pad nếu có."""
-    tone = "highpass=f=35,lowpass=f=6200,equalizer=f=3200:t=q:w=1.2:g=-3"
+    # Trong và mềm: cắt tiếng ầm dưới 60 Hz, bớt vùng ù ~250 Hz, giảm nhẹ vùng chói 3 kHz và treble gắt.
+    tone = ("highpass=f=60,equalizer=f=250:t=q:w=1.2:g=-3,equalizer=f=3000:t=q:w=1.0:g=-2,"
+            "highshelf=f=6000:g=-2,lowpass=f=10000")
     if pad_wav:
-        graph = f"[0:a]{tone}[p];[1:a]lowpass=f=2200[q];[p][q]amix=inputs=2:weights=1 1:normalize=0"
+        graph = f"[0:a]{tone}[p];[1:a]lowpass=f=1400[q];[p][q]amix=inputs=2:weights=1 1:normalize=0"
         run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", piano, "-i", pad_wav,
              "-filter_complex", graph, dst])
     else:

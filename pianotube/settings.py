@@ -12,6 +12,15 @@ DEFAULTS = {
     "synthetic": True,           # khai báo "nội dung do AI tạo" (ảnh nền Gemini trông như ảnh thật)
     "title_note": "",            # ghi chú thêm cho Gemini khi viết tiêu đề/mô tả
     "account": "",
+    # Lịch tự động: đến giờ thì làm video ambient hàng loạt và đăng YouTube.
+    "auto_enabled": False,
+    "auto_times": "14:00",       # giờ chạy mỗi ngày (giờ máy), vd "09:00, 21:00"
+    "auto_days": [0, 1, 2, 3, 4, 5, 6],  # 0 = Thứ 2 … 6 = Chủ nhật
+    "auto_count": 1,             # số video mỗi lượt
+    "auto_minutes": 50,
+    "auto_effect": "grain",
+    "auto_upload": True,
+    "auto_mode": "slot",         # cách đăng: slot | private | unlisted | public
 }
 
 

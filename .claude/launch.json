@@ -4,8 +4,15 @@
     {
       "name": "pianotube-ui",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-c", "PIANOTUBE_NO_BROWSER=1 .venv/bin/python -m pianotube.ui"],
+      "runtimeArgs": [
+        "-c",
+        "PIANOTUBE_NO_BROWSER=1 .venv/bin/python -m pianotube.ui"
+      ],
       "port": 7860
+    },
+    {
+      "name": "pianotube-ui-attach",
+      "url": "http://localhost:7860"
     }
   ]
 }

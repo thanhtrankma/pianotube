@@ -218,10 +218,12 @@ def upload(folder: Path, privacy: str = "private", publish_at: datetime | None =
                             resumable=True, mimetype="video/mp4")
     req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
     log(f"🚀 Đang tải lên: {title}")
-    resp, retries = None, 5
+    MAX_RETRIES = 8
+    resp, retries = None, MAX_RETRIES
     while resp is None:
         try:
             st, resp = req.next_chunk()
+            retries = MAX_RETRIES          # tải được thêm một đoạn → đặt lại số lần thử
             if st and progress:
                 progress(st.progress())
         except HttpError as e:
@@ -232,14 +234,14 @@ def upload(folder: Path, privacy: str = "private", publish_at: datetime | None =
             if e.resp.status in (500, 502, 503, 504) and retries:
                 retries -= 1
                 log(f"⚠️ Lỗi máy chủ YouTube, thử lại… (còn {retries} lần)")
-                time.sleep(5)
+                time.sleep(5 * (MAX_RETRIES - retries))
                 continue
             raise
         except OSError as e:
             if retries:
                 retries -= 1
                 log(f"⚠️ Mất kết nối ({e}), thử lại… (còn {retries} lần)")
-                time.sleep(5)
+                time.sleep(5 * (MAX_RETRIES - retries))
                 continue
             raise
     vid = resp["id"]

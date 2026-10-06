@@ -33,6 +33,53 @@ def gradient_background(top=(12, 14, 30), bottom=(38, 22, 52), size=(W, H)) -> I
     return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
+BG_DIR = config.ROOT / "assets" / "backgrounds"
+BG_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+BG_USED_FILE = config.ROOT / "data" / "backgrounds_used.json"
+
+
+def local_backgrounds() -> list[Path]:
+    if not BG_DIR.exists():
+        return []
+    return sorted(p for p in BG_DIR.iterdir() if p.suffix.lower() in BG_EXTS)
+
+
+def pick_background(choice: str | None = None) -> Path | None:
+    """Chọn ảnh trong assets/backgrounds: ảnh lâu chưa dùng nhất (ngẫu nhiên nếu hoà) và ghi lại lần dùng.
+    choice: tên file hoặc đường dẫn cụ thể."""
+    import json
+    import random
+    from datetime import datetime
+
+    if choice:
+        p = Path(choice)
+        p = p if p.exists() else BG_DIR / choice
+        if not p.exists():
+            raise FileNotFoundError(f"Không thấy ảnh nền: {choice}")
+        files = [p]
+    else:
+        files = local_backgrounds()
+        if not files:
+            return None
+    try:
+        used = json.loads(BG_USED_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        used = {}
+    oldest = min(used.get(p.name, "") for p in files)
+    pick = random.choice([p for p in files if used.get(p.name, "") == oldest])
+    used[pick.name] = datetime.now().isoformat(timespec="seconds")
+    BG_USED_FILE.parent.mkdir(exist_ok=True)
+    BG_USED_FILE.write_text(json.dumps(used, indent=2, ensure_ascii=False))
+    return pick
+
+
+def describe_background(path: Path) -> str:
+    """'Girl_sitting_on_wooden_pier_2K_2026…-clean.png' → 'girl sitting on wooden pier'."""
+    import re
+    stem = re.sub(r"_\d+K_\d+.*$|-clean$", "", path.stem)
+    return stem.replace("_", " ").replace("-", " ").strip().lower()
+
+
 def falling_background(image: Image.Image | None) -> np.ndarray:
     """Nền cho mẫu phím rơi: ảnh làm mờ + tối đi để nốt nhạc nổi bật."""
     if image is None:

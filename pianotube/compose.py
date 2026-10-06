@@ -52,7 +52,12 @@ def _chord_pcs(key: int, degree: int, ext: str) -> list:
     return [(key + MAJOR[j % 7]) % 12 for j in idx]
 
 
-def _voicing(pcs: list, bass_lo=38, bass_hi=50) -> list:
+# Giới hạn âm vực: giai điệu nằm ở vùng giữa ấm áp (C4–G5), tránh quãng cao dễ chói tai.
+MELODY_LO, MELODY_HI = 62, 81
+MELODY_SOFT_ABOVE = 76          # nốt cao hơn E5 được đánh khẽ dần
+
+
+def _voicing(pcs: list, bass_lo=40, bass_hi=51) -> list:
     """Xếp hợp âm tay trái: nốt gốc trầm rồi các nốt còn lại mở rộng lên trên."""
     root = pcs[0]
     bass = next(p for p in range(bass_lo, bass_hi + 1) if p % 12 == root)
@@ -62,7 +67,8 @@ def _voicing(pcs: list, bass_lo=38, bass_hi=50) -> list:
     for pc in order:
         cur = next(p for p in range(cur + 1, cur + 13) if p % 12 == pc)
         tones.append(cur)
-    return tones
+    # Không để đệm tay trái leo lên vùng giai điệu.
+    return [p - 12 if p > 64 else p for p in tones]
 
 
 def _scale_pitches(key: int, lo: int, hi: int) -> list:
@@ -92,14 +98,15 @@ def compose(seed: int, bars_hint: int = 44) -> Piece:
     chords = []
 
     # Giai điệu đoạn A sinh một lần rồi dùng lại (có biến tấu) để bài có "chủ đề".
-    melody_scale = _scale_pitches(key, 67, 86)
+    melody_scale = _scale_pitches(key, MELODY_LO, MELODY_HI)
     a_rhythms = [rng.choice(RHYTHMS) for _ in range(8)]
     a_melody = None
 
     t = 0.0
     bar_i = 0
-    last_pitch = rng.choice(melody_scale[4:10])
-    a3_shift = 12 if rng.random() < 0.35 else 0          # đoạn A cuối có thể lên 1 quãng tám
+    mid = len(melody_scale) // 2
+    last_pitch = rng.choice(melody_scale[mid - 2:mid + 2])
+    a3_shift = -12 if rng.random() < 0.3 else 0          # đoạn A cuối có thể xuống 1 quãng tám cho ấm
 
     for name, n_bars, prog in sections:
         section_notes = []
@@ -139,7 +146,7 @@ def compose(seed: int, bars_hint: int = 44) -> Piece:
                 if name in ("A", "A2", "A3") and a_melody is not None and name != "A":
                     bar_notes = a_melody[b]
                     shift = a3_shift if name == "A3" else 0
-                    bar_notes = [(o, d, p + shift if p + shift <= 91 else p) for o, d, p in bar_notes]
+                    bar_notes = [(o, d, p + shift if p + shift >= 55 else p) for o, d, p in bar_notes]
                 else:
                     rhythm = a_rhythms[b] if name.startswith("A") else rng.choice(RHYTHMS)
                     if name == "outro":
@@ -148,8 +155,11 @@ def compose(seed: int, bars_hint: int = 44) -> Piece:
                     for j, (o, d) in enumerate(rhythm):
                         chord_tones = [p for p in melody_scale if p % 12 in pcs]
                         if j == 0 or d >= 2:
-                            # Nốt dài/đầu ô nhịp: chọn nốt thuộc hợp âm gần nốt trước.
-                            cand = sorted(chord_tones, key=lambda p: abs(p - last_pitch))[:3]
+                            # Nốt dài/đầu ô nhịp: chọn nốt thuộc hợp âm gần nốt trước, hơi kéo về giữa âm vực
+                            # để giai điệu không trôi dần lên cao.
+                            center = (MELODY_LO + MELODY_HI) / 2 - 2
+                            cand = sorted(chord_tones,
+                                          key=lambda p: abs(p - last_pitch) + 0.35 * abs(p - center))[:3]
                         else:
                             i = melody_scale.index(min(melody_scale, key=lambda p: abs(p - last_pitch)))
                             cand = [melody_scale[max(0, min(len(melody_scale) - 1, i + s))]
@@ -160,12 +170,15 @@ def compose(seed: int, bars_hint: int = 44) -> Piece:
 
                 for o, d, p in bar_notes:
                     on = t + o * beat * stretch + rng.uniform(-0.02, 0.02)
-                    vel = 46 + (6 if name.startswith("B") else 0) + rng.randint(-6, 6)
-                    rh.notes.append(pretty_midi.Note(vel, p, max(0, on), on + d * beat * stretch * 0.95))
-                    # Thỉnh thoảng thêm một nốt cao lấp lánh ở đoạn B.
-                    if name.startswith("B") and d >= 2 and rng.random() < 0.25 and p + 12 <= 96:
-                        rh.notes.append(pretty_midi.Note(max(20, vel - 16), p + 12,
-                                                         on + 0.03, on + d * beat * stretch))
+                    vel = 42 + (4 if name.startswith("B") else 0) + rng.randint(-5, 5)
+                    vel -= 2 * max(0, p - MELODY_SOFT_ABOVE)          # nốt càng cao đánh càng khẽ
+                    rh.notes.append(pretty_midi.Note(max(20, vel), p, max(0, on), on + d * beat * stretch * 0.95))
+                    # Đoạn B: thỉnh thoảng thêm một nốt hoà âm thấp hơn (quãng 3/6 dưới) cho dày và ấm.
+                    if name.startswith("B") and d >= 2 and rng.random() < 0.3:
+                        below = [q for q in range(p - 9, p - 2) if q % 12 in pcs and q >= 55]
+                        if below:
+                            rh.notes.append(pretty_midi.Note(max(18, vel - 12), below[-1],
+                                                             on + 0.04, on + d * beat * stretch * 0.95))
 
             # --- pedal: nhấn ngay sau đầu ô nhịp, nhả ngay trước ô sau
             lh.control_changes.append(pretty_midi.ControlChange(64, 127, t + 0.03))

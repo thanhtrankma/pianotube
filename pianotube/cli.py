@@ -4,6 +4,7 @@
   pianotube falling <id|file.mid>
   pianotube library add FILE.mid --title ... --composer ... --license ... --source URL
   pianotube library list
+  pianotube autorun [--force]
 """
 import argparse
 import datetime as dt
@@ -23,6 +24,19 @@ def out_folder(name: str) -> Path:
     folder = config.OUTPUT_DIR / f"{dt.datetime.now():%Y-%m-%d_%H%M}_{library.slug(name)[:50]}"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def load_background(args, gemini_prompt: str | None):
+    """Ảnh nền: assets/backgrounds (ảnh lâu chưa dùng nhất) → Gemini → None (nền gradient).
+    Trả về (ảnh, tên file ảnh local hoặc None)."""
+    path = imaging.pick_background(getattr(args, "background", None))
+    if path:
+        print(f"  🖼 Ảnh nền: {path.name}")
+        return Image.open(path).convert("RGB"), path.name
+    if gemini_prompt and not args.no_ai_image:
+        print("  🎨 Gemini tạo ảnh nền…")
+        return gemini.image(gemini_prompt), None
+    return None, None
 
 
 def piece_audio(item: dict, soft: bool = False) -> Path:
@@ -120,12 +134,9 @@ def cmd_falling(args):
     print(f"→ {folder}")
     wav = piece_audio(item)
 
-    bg_img = None
-    if not args.no_ai_image:
-        print("  🎨 Gemini tạo ảnh nền…")
-        bg_img = gemini.image(
-            f"Atmospheric, painterly background evoking '{item['title']}' by {item['composer']}. "
-            "Soft light, elegant, no text, no people, no piano keys, cinematic 16:9.")
+    bg_img, bg_file = load_background(
+        args, f"Atmospheric, painterly background evoking '{item['title']}' by {item['composer']}. "
+              "Soft light, elegant, no text, no people, no piano keys, cinematic 16:9.")
     background = imaging.falling_background(bg_img)
 
     video = folder / "video.mp4"
@@ -136,7 +147,8 @@ def cmd_falling(args):
         f"Video type: falling-notes piano visualization (Synthesia style), right hand blue, left hand orange.\n"
         f"Piece: {item['title']}\nComposer: {item['composer']}") or fallback_meta("falling", [item], None)
     meta = metadata.build(ai, [item], None)
-    meta.update(kind="falling", mood=f"{item['composer']} – {item['title']}", ai_image=bg_img is not None)
+    meta.update(kind="falling", mood=f"{item['composer']} – {item['title']}", ai_image=bg_img is not None,
+                background=bg_file)
     metadata.write(meta, folder)
 
     frame = folder / "frame.png"
@@ -172,12 +184,9 @@ def cmd_relax(args):
     starts = audio.concat_crossfade(wavs, mix, args.xfade)
     seconds = audio.duration(mix)
 
-    bg_img = None
-    if not args.no_ai_image:
-        print("  🎨 Gemini tạo ảnh nền…")
-        bg_img = gemini.image(
-            f"Cozy, calm scene for '{args.theme}'. Painterly lo-fi illustration, warm soft light, "
-            "gentle atmosphere, no text, no logos, no people's faces, cinematic 16:9.")
+    bg_img, bg_file = load_background(
+        args, f"Cozy, calm scene for '{args.theme}'. Painterly lo-fi illustration, warm soft light, "
+              "gentle atmosphere, no text, no logos, no people's faces, cinematic 16:9.")
     ai_image = bg_img is not None
     bg_img = bg_img or imaging.gradient_background()
     bg_img.save(folder / "background.png")
@@ -196,7 +205,7 @@ def cmd_relax(args):
         f"Video type: long relaxing classical piano mix, {seconds / 3600:.1f} hours.\n"
         f"Theme / use-case: {args.theme}\nPieces:\n{names}") or fallback_meta("relax", pieces, args.theme)
     meta = metadata.build(ai, pieces, list(zip(starts, pieces)))
-    meta.update(kind="relax", mood=args.theme, ai_image=ai_image)
+    meta.update(kind="relax", mood=args.theme, ai_image=ai_image, background=bg_file)
     metadata.write(meta, folder)
     imaging.thumbnail(bg_img, ai["thumbnail_text"], "Relaxing Classical Piano", folder / "thumbnail.jpg")
     library.mark_used([p["id"] for p in pieces])
@@ -220,7 +229,7 @@ def cmd_ambient(args):
         raw = tracks_dir / f"{k + 1:02d}.raw.wav"
         audio.render_midi(mid, raw, soft=True)
         pad_wav = None
-        if not args.no_pad:
+        if getattr(args, "pad", False):
             pad_wav = audio.pad(piece.chords, audio.duration(raw), tracks_dir / "pad.wav")
         warm = audio.warm(raw, tracks_dir / f"{k + 1:02d}.warm.wav", pad_wav)
         final = audio.normalize(warm, tracks_dir / f"{k + 1:02d}.wav", target=AMBIENT_LUFS)
@@ -237,10 +246,9 @@ def cmd_ambient(args):
     seconds = audio.duration(mix)
 
     scene = args.scene or random.choice(SCENES)
-    bg_img = None
-    if not args.no_ai_image:
-        print(f"  🎨 Gemini tạo ảnh: {scene}")
-        bg_img = gemini.image(ambient_image_prompt(scene))
+    bg_img, bg_file = load_background(args, ambient_image_prompt(scene))
+    if bg_file:
+        scene = imaging.describe_background(Path(bg_file))
     ai_image = bg_img is not None
     bg_img = bg_img or imaging.gradient_background((18, 22, 28), (46, 52, 58))
     bg_img.save(folder / "background.png")
@@ -273,7 +281,8 @@ def cmd_ambient(args):
     pieces = [{"id": f"t{i}", "title": f"{i + 1:02d}. {n}", "composer": "", "original": True}
               for i, n in enumerate(names)]
     meta = metadata.build(ai, pieces, list(zip(starts, pieces)))
-    meta.update(kind="ambient", mood=args.mood, seed=base_seed, scene=scene, ai_image=ai_image)
+    meta.update(kind="ambient", mood=args.mood, seed=base_seed, scene=scene, ai_image=ai_image,
+                background=bg_file)
     metadata.write(meta, folder)
     if args.thumb_text:
         imaging.thumbnail(bg_img, ai["thumbnail_text"], "piano playlist", folder / "thumbnail.jpg")
@@ -328,10 +337,15 @@ def cmd_batch(args):
         print(f"━━ Video {i}/{args.count}: {mood}", flush=True)
         sub_args = argparse.Namespace(
             mood=mood, minutes=args.minutes, scene=None, seed=None, xfade=4.0, effect=args.effect,
-            visualizer=False, no_pad=False, thumb_text=False, no_ai_image=args.no_ai_image,
+            visualizer=False, pad=False, thumb_text=False, no_ai_image=args.no_ai_image, background=None,
             upload=args.upload, upload_mode=args.upload_mode, upload_at=None)
         cmd_ambient(sub_args)
     print("🏁 Hoàn tất hàng loạt.")
+
+
+def cmd_autorun(args):
+    from . import scheduler
+    scheduler.autorun(force=args.force)
 
 
 def add_upload_args(p):
@@ -357,6 +371,7 @@ def main():
     fall = sub.add_parser("falling", help="video phím đàn rơi cho 1 bài")
     fall.add_argument("piece", help="id trong thư viện hoặc tên file .mid")
     fall.add_argument("--no-ai-image", action="store_true", help="dùng nền gradient, không gọi Gemini")
+    fall.add_argument("--background", help="tên file trong assets/backgrounds (mặc định: ảnh lâu chưa dùng nhất)")
     add_upload_args(fall)
     fall.set_defaults(func=cmd_falling)
 
@@ -369,6 +384,7 @@ def main():
     rel.add_argument("--effect", choices=["dust", "grain", "none"], default="dust")
     rel.add_argument("--bright", action="store_true", help="giữ tiếng đàn gốc, không làm mềm")
     rel.add_argument("--no-ai-image", action="store_true")
+    rel.add_argument("--background", help="tên file trong assets/backgrounds (mặc định: ảnh lâu chưa dùng nhất)")
     add_upload_args(rel)
     rel.set_defaults(func=cmd_relax)
 
@@ -376,14 +392,15 @@ def main():
     amb.add_argument("--mood", default="when the world feels too loud",
                      help="cảm xúc/chủ đề của video (tiếng Anh)")
     amb.add_argument("--minutes", type=float, default=50)
-    amb.add_argument("--scene", help="mô tả cảnh cho ảnh nền (mặc định chọn ngẫu nhiên)")
+    amb.add_argument("--scene", help="mô tả cảnh cho ảnh Gemini, chỉ dùng khi assets/backgrounds trống")
     amb.add_argument("--seed", type=int, help="cùng seed = cùng giai điệu")
     amb.add_argument("--xfade", type=float, default=4.0)
     amb.add_argument("--effect", choices=["grain", "dust", "none"], default="grain")
     amb.add_argument("--visualizer", action="store_true")
-    amb.add_argument("--no-pad", action="store_true", help="bỏ lớp pad nền")
+    amb.add_argument("--pad", action="store_true", help="thêm lớp pad synth nền (mặc định tắt: nghe như tiếng sáo)")
     amb.add_argument("--thumb-text", action="store_true", help="thêm chữ lên thumbnail")
     amb.add_argument("--no-ai-image", action="store_true")
+    amb.add_argument("--background", help="tên file trong assets/backgrounds (mặc định: ảnh lâu chưa dùng nhất)")
     add_upload_args(amb)
     amb.set_defaults(func=cmd_ambient)
 
@@ -409,6 +426,10 @@ def main():
     bt.add_argument("--no-ai-image", action="store_true")
     add_upload_args(bt)
     bt.set_defaults(func=cmd_batch)
+
+    ar = sub.add_parser("autorun", help="chạy lịch tự động (launchd/giao diện gọi lệnh này)")
+    ar.add_argument("--force", action="store_true", help="chạy ngay một lượt, không cần tới giờ")
+    ar.set_defaults(func=cmd_autorun)
 
     args = ap.parse_args()
     if args.cmd == "library" and args.action == "add" and not (args.file and args.title and args.composer):

@@ -9,11 +9,12 @@ from pathlib import Path
 
 import gradio as gr
 
-from . import config, library, publish, settings, youtube
+from . import config, imaging, library, publish, scheduler, settings, youtube
 from .cli import SCENES
 
 ENV_FILE = config.ROOT / ".env"
 RANDOM_SCENE = "Ngẫu nhiên"
+AUTO_BG = "🎲 Tự chọn (ảnh lâu chưa dùng nhất)"
 _proc = {"p": None}
 _lock = threading.Lock()
 
@@ -141,9 +142,67 @@ def soundfont_status() -> str:
         return "✗ Chưa có soundfont. Chạy scripts/setup_assets.sh trong Terminal."
 
 
+def bg_names() -> list:
+    return [p.name for p in imaging.local_backgrounds()]
+
+
+def bg_gallery() -> list:
+    return [(str(p), imaging.describe_background(p)) for p in imaging.local_backgrounds()]
+
+
+def bg_preview(name: str):
+    return str(imaging.BG_DIR / name) if name and name != AUTO_BG else None
+
+
+def add_backgrounds(files):
+    import shutil
+    if not files:
+        return gr.update(), "Chưa chọn ảnh.", gr.update(), gr.update()
+    imaging.BG_DIR.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for f in files:
+        src = Path(f)
+        if src.suffix.lower() in imaging.BG_EXTS:
+            shutil.copy(src, imaging.BG_DIR / src.name)
+            n += 1
+    return (bg_gallery(), f"✓ Đã thêm {n} ảnh.", gr.update(choices=[AUTO_BG] + bg_names()), bg_gallery())
+
+
+def _ok(flag: bool) -> str:
+    return "✅" if flag else "⚠️"
+
+
+def overview_md() -> str:
+    try:
+        sf = config.soundfont_path().name
+    except SystemExit:
+        sf = None
+    key = bool(read_env().get("GEMINI_API_KEY"))
+    acc = dict((v, k) for k, v in youtube.accounts()).get(youtube.active_account())
+    n_bg = len(imaging.local_backgrounds())
+    s = settings.load()
+    nxt = scheduler.next_run(s)
+    auto = (f"Bật · lượt tới **{nxt:%H:%M %d/%m}**" if nxt else "Bật, nhưng chưa có giờ/ngày hợp lệ") \
+        if s["auto_enabled"] else "Tắt"
+    bg_mode = " · chạy nền macOS ✓" if scheduler.launchd_installed() else ""
+    rows = [
+        f"| {_ok(sf)} | Âm thanh piano | {sf or 'Chưa có soundfont: chạy `scripts/setup_assets.sh`'} |",
+        f"| {_ok(key)} | Gemini (viết tiêu đề, mô tả) | {'Đã có key' if key else 'Chưa có key: vào tab ⚙️ Cài đặt'} |",
+        f"| {_ok(acc)} | Kênh YouTube | {acc or 'Chưa đăng nhập: vào tab 📺 YouTube'} |",
+        f"| {_ok(n_bg)} | Ảnh nền | {f'{n_bg} ảnh' if n_bg else 'Chưa có ảnh: vào tab 🖼 Ảnh nền'} |",
+        f"| {_ok(s['auto_enabled'])} | Lịch tự động | {auto}{bg_mode} |",
+        f"| 🗓 | Khung giờ đăng trống tiếp theo | {next_slot_text() or '—'} |",
+    ]
+    return "| | Mục | Trạng thái |\n|---|---|---|\n" + "\n".join(rows)
+
+
+def recent_uploads_rows(n=8):
+    return uploads_rows()[:n]
+
+
 # ---------- tạo video ----------
 
-def build_argv(kind, mood, amb_minutes, scene, custom_scene, seed, amb_effect, amb_thumb,
+def build_argv(kind, bg, mood, amb_minutes, scene, custom_scene, seed, amb_effect, amb_thumb,
                theme, rel_minutes, composer, rel_effect, bright, piece, visualizer, no_ai, auto_up):
     if kind == "Ambient (nhạc tự sáng tác)":
         argv = ["ambient", "--mood", mood or "when the world feels too loud",
@@ -168,6 +227,8 @@ def build_argv(kind, mood, amb_minutes, scene, custom_scene, seed, amb_effect, a
         argv = ["falling", piece]
     if visualizer and kind != "Phím đàn rơi (1 bài)":
         argv.append("--visualizer")
+    if bg and bg != AUTO_BG:
+        argv += ["--background", bg]
     if no_ai:
         argv.append("--no-ai-image")
     if auto_up:
@@ -295,29 +356,75 @@ def cred_status() -> str:
             else "✗ Chưa có client_secret.json (xem hướng dẫn bên dưới)")
 
 
-def run_batch(count, minutes, effect, no_ai, auto_up, mode_label):
+def run_now():
+    """Chạy ngay một lượt tự động theo cài đặt lịch, hiện nhật ký trực tiếp."""
     if not _lock.acquire(blocking=False):
-        raise gr.Error("Đang có tác vụ khác chạy.")
+        raise gr.Error("Đang có tác vụ khác chạy trong giao diện, đợi xong đã.")
+    if scheduler.is_running():
+        _lock.release()
+        raise gr.Error("Một lượt tự động đang chạy nền. Xem nhật ký bên dưới.")
     try:
-        argv = ["batch", "--count", str(int(count)), "--minutes", str(minutes), "--effect", effect]
-        if no_ai:
-            argv.append("--no-ai-image")
-        if auto_up:
-            argv += ["--upload", "--upload-mode", MODES[mode_label]]
         log, status = [], "⏳ Bắt đầu…"
-        for line in run_cli(argv):
+        for line in run_cli(["autorun", "--force"]):
             if line.startswith("__EXIT__"):
                 status = "🏁 Hoàn tất." if line == "__EXIT__0" else "✗ Có lỗi hoặc đã dừng."
                 break
-            if line.startswith("frame="):
+            if line.startswith(("frame=", "size=")):
                 continue
             log.append(line)
-            if line.startswith(("━━", "🧠", "📤", "✗", "🏁")):
+            if line.startswith(("━━", "🧠", "📤", "✗", "🏁", "⏰")):
                 status = line
             yield status, "\n".join(log[-80:])
         yield status, "\n".join(log[-80:])
     finally:
         _lock.release()
+
+
+def auto_status_md() -> str:
+    s = settings.load()
+    st = scheduler.load_state()
+    lines = []
+    if scheduler.is_running():
+        lines.append("🔄 **Đang chạy một lượt tự động…** (nhật ký bên dưới tự cập nhật)")
+    nxt = scheduler.next_run(s)
+    if not s["auto_enabled"]:
+        lines.append("⏸ Lịch tự động đang **tắt**.")
+    elif nxt:
+        lines.append(f"⏰ Lượt tiếp theo: **{nxt:%H:%M, %d/%m/%Y}** ({scheduler.DAY_NAMES[nxt.weekday()]})")
+    else:
+        lines.append("⚠️ Chưa có giờ hoặc ngày chạy hợp lệ.")
+    lines.append("🖥 Chạy nền khi tắt giao diện: **" + ("đang bật" if scheduler.launchd_installed() else "tắt")
+                 + "**")
+    md = "\n\n".join(lines)
+    if st["runs"]:
+        rows = ["| Bắt đầu | Kết thúc | Kết quả | Video đã đăng |", "|---|---|---|---|"]
+        for r in reversed(st["runs"][-6:]):
+            res = "⏳ đang chạy" if r["ok"] is None else ("✅ xong" if r["ok"] else "✗ lỗi")
+            ups = " ".join(f"[link]({u})" for u in r["uploads"]) or "—"
+            rows.append(f"| {r['started']}{' (tay)' if r['manual'] else ''} | {r['finished'] or '—'} | {res} | {ups} |")
+        md += "\n\n**Các lượt gần đây**\n\n" + "\n".join(rows)
+    return md
+
+
+def save_auto(enabled, times_txt, days, count, minutes, effect, upload, mode_label, background):
+    if enabled and not youtube.parse_slots(times_txt):
+        raise gr.Error("Giờ chạy không hợp lệ. Ví dụ đúng: 09:00, 21:00")
+    if enabled and not days:
+        raise gr.Error("Chọn ít nhất một ngày trong tuần.")
+    s = settings.save(auto_enabled=bool(enabled), auto_times=times_txt, auto_days=[int(d) for d in days],
+                      auto_count=int(count), auto_minutes=float(minutes), auto_effect=effect,
+                      auto_upload=bool(upload), auto_mode=MODES[mode_label])
+    msg = "✓ Đã lưu lịch."
+    try:
+        if enabled and background:
+            scheduler.install_launchd(s)
+            msg += " Đã bật chạy nền macOS."
+        elif scheduler.launchd_installed():
+            scheduler.uninstall_launchd()
+            msg += " Đã tắt chạy nền macOS."
+    except Exception as e:
+        msg += f" ⚠️ Không cài được chạy nền: {e}"
+    return msg, auto_status_md()
 
 
 def stop():
@@ -347,106 +454,190 @@ gửi form kiểm duyệt miễn phí [YouTube API Audit](https://support.google
 """
 
 CSS = """
-.gradio-container {max-width: 1180px !important; margin: auto;}
+.gradio-container {max-width: 1200px !important; margin: auto;}
 #status {font-size: 1.05rem;}
+#hero h1 {margin-bottom: 0;}
+#hero p {opacity: .75; margin-top: 4px;}
+.step-note {opacity: .75; font-size: .92rem;}
 """
+
+KIND_AMB, KIND_REL, KIND_FALL = "Ambient (nhạc tự sáng tác)", "Thư giãn (nhạc cổ điển)", "Phím đàn rơi (1 bài)"
 
 
 def build() -> gr.Blocks:
     env = read_env()
+    st = settings.load()
+    mode_label = {v: k for k, v in MODES.items()}
     with gr.Blocks(title="PianoTube") as app:
-        gr.Markdown("# 🎹 PianoTube\nTự động làm video nhạc piano cho YouTube.")
+        gr.Markdown("# 🎹 PianoTube\nTự làm video nhạc piano thư giãn và đăng lên YouTube.", elem_id="hero")
 
+        # ---------------- Tổng quan ----------------
+        with gr.Tab("🏠 Tổng quan"):
+            with gr.Row():
+                with gr.Column(scale=5):
+                    gr.Markdown("### Tình trạng")
+                    ov = gr.Markdown(overview_md())
+                    ov_refresh = gr.Button("↻ Làm mới", size="sm")
+                with gr.Column(scale=6):
+                    gr.Markdown("### Bắt đầu thế nào?")
+                    gr.Markdown(
+                        "1. **🎬 Tạo video**: chọn chủ đề, thời lượng, ảnh nền rồi bấm *Tạo video*.\n"
+                        "2. **📂 Video đã tạo**: xem lại, sửa tiêu đề/mô tả, bấm *Đăng video này*.\n"
+                        "3. **⏰ Lịch tự động**: đặt giờ để app tự làm video và tự đăng mỗi ngày, "
+                        "không cần ngồi bấm.\n\n"
+                        "Các mục ⚠️ bên trái cần làm một lần trước khi đăng YouTube.")
+            gr.Markdown("### Video đăng gần đây")
+            ov_ups = gr.Dataframe(recent_uploads_rows(), headers=["Lịch / trạng thái", "Tiêu đề", "Link", "Tài khoản"],
+                                  interactive=False, wrap=True)
+
+        # ---------------- Tạo video ----------------
         with gr.Tab("🎬 Tạo video"):
             with gr.Row():
                 with gr.Column(scale=5):
-                    kind = gr.Radio(["Ambient (nhạc tự sáng tác)", "Thư giãn (nhạc cổ điển)", "Phím đàn rơi (1 bài)"],
-                                    value="Ambient (nhạc tự sáng tác)", label="Loại video")
+                    kind = gr.Radio([KIND_AMB, KIND_REL, KIND_FALL], value=KIND_AMB, label="① Loại video")
 
                     with gr.Group(visible=True) as g_amb:
-                        mood = gr.Textbox(label="Cảm xúc / chủ đề (tiếng Anh)",
+                        mood = gr.Textbox(label="② Cảm xúc / chủ đề (tiếng Anh)",
                                           value="when the world feels too loud",
-                                          info="Gemini dựa vào đây để đặt tiêu đề, mô tả, tên bài")
-                        amb_minutes = gr.Slider(5, 180, value=50, step=5, label="Thời lượng (phút)")
-                        scene = gr.Dropdown([RANDOM_SCENE] + SCENES, value=RANDOM_SCENE, label="Cảnh nền")
-                        custom_scene = gr.Textbox(label="…hoặc tự mô tả cảnh (tiếng Anh)",
-                                                  placeholder="e.g. a lighthouse on a foggy coast")
-                        with gr.Row():
-                            amb_effect = gr.Radio(["grain", "dust", "none"], value="grain",
-                                                  label="Hiệu ứng hình")
-                            seed = gr.Number(label="Seed (để trống = giai điệu mới)", precision=0)
-                        amb_thumb = gr.Checkbox(label="Thêm chữ lên thumbnail", value=False)
+                                          info="Dùng để đặt tiêu đề, mô tả và tên các bài")
+                        amb_minutes = gr.Slider(5, 180, value=50, step=5, label="③ Thời lượng (phút)")
 
                     with gr.Group(visible=False) as g_rel:
-                        theme = gr.Textbox(label="Chủ đề (tiếng Anh)", value="rainy night study")
-                        rel_minutes = gr.Slider(5, 180, value=60, step=5, label="Thời lượng (phút)")
+                        theme = gr.Textbox(label="② Chủ đề (tiếng Anh)", value="rainy night study")
+                        rel_minutes = gr.Slider(5, 180, value=60, step=5, label="③ Thời lượng (phút)")
                         composer = gr.Dropdown(composer_choices(), value="Tất cả", label="Nhà soạn nhạc")
-                        rel_effect = gr.Radio(["dust", "grain", "none"], value="dust", label="Hiệu ứng hình")
-                        bright = gr.Checkbox(label="Giữ tiếng đàn gốc (không làm mềm)", value=False)
 
                     with gr.Group(visible=False) as g_fall:
-                        piece = gr.Dropdown(piece_choices(), label="Bài nhạc")
+                        piece = gr.Dropdown(piece_choices(), label="② Bài nhạc")
 
-                    with gr.Row():
-                        visualizer = gr.Checkbox(label="Sóng nhạc (chậm hơn)", value=False)
-                        no_ai = gr.Checkbox(label="Không dùng ảnh Gemini", value=not env.get("GEMINI_API_KEY"))
-                    auto_up = gr.Checkbox(label="📤 Tự đăng YouTube khi xong (theo lịch ở tab YouTube)", value=False)
+                    bg = gr.Dropdown([AUTO_BG] + bg_names(), value=AUTO_BG, label="④ Ảnh nền",
+                                     info="Bấm vào một ảnh bên dưới để chọn")
+                    bg_pick = gr.Gallery(bg_gallery(), columns=5, height=190, allow_preview=False,
+                                         show_label=False, object_fit="cover")
+
+                    auto_up = gr.Checkbox(label="📤 Làm xong thì tự đăng YouTube (theo lịch đăng ở tab 📺 YouTube)",
+                                          value=False)
+                    with gr.Accordion("Tuỳ chọn nâng cao", open=False):
+                        with gr.Row():
+                            amb_effect = gr.Radio(["grain", "dust", "none"], value="grain", label="Hiệu ứng hình (ambient)")
+                            rel_effect = gr.Radio(["dust", "grain", "none"], value="dust", label="Hiệu ứng hình (thư giãn)")
+                        with gr.Row():
+                            seed = gr.Number(label="Seed giai điệu (để trống = mới)", precision=0)
+                            amb_thumb = gr.Checkbox(label="Thêm chữ lên thumbnail", value=False)
+                        with gr.Row():
+                            visualizer = gr.Checkbox(label="Sóng nhạc (chậm hơn)", value=False)
+                            bright = gr.Checkbox(label="Giữ tiếng đàn gốc (thư giãn)", value=False)
+                        gr.Markdown("Chỉ dùng khi thư mục ảnh nền trống:", elem_classes="step-note")
+                        with gr.Row():
+                            scene = gr.Dropdown([RANDOM_SCENE] + SCENES, value=RANDOM_SCENE, label="Cảnh cho Gemini vẽ")
+                            custom_scene = gr.Textbox(label="…hoặc tự mô tả cảnh (tiếng Anh)")
+                        no_ai = gr.Checkbox(label="Không gọi Gemini vẽ ảnh (dùng nền màu trơn)", value=False)
                     with gr.Row():
                         go = gr.Button("▶ Tạo video", variant="primary", size="lg")
                         stop_btn = gr.Button("⏹ Dừng", size="lg")
 
                 with gr.Column(scale=6):
                     status = gr.Markdown("Sẵn sàng.", elem_id="status")
+                    bg_prev = gr.Image(label="Ảnh nền đã chọn", interactive=False, height=240)
                     out_video = gr.Video(label="Video", interactive=False)
-                    out_thumb = gr.Image(label="Thumbnail", interactive=False, height=220)
+                    out_thumb = gr.Image(label="Thumbnail", interactive=False, height=200, visible=False)
                     out_title = gr.Textbox(label="Tiêu đề", buttons=["copy"])
-                    out_desc = gr.Textbox(label="Mô tả", lines=8, buttons=["copy"])
+                    out_desc = gr.Textbox(label="Mô tả", lines=6, buttons=["copy"])
                     out_tags = gr.Textbox(label="Tags", buttons=["copy"])
                     with gr.Accordion("Nhật ký", open=False):
                         log = gr.Textbox(lines=14, max_lines=14, show_label=False, autoscroll=True)
 
             def toggle(k):
-                return (gr.update(visible=k.startswith("Ambient")), gr.update(visible=k.startswith("Thư giãn")),
-                        gr.update(visible=k.startswith("Phím")))
+                return (gr.update(visible=k == KIND_AMB), gr.update(visible=k == KIND_REL),
+                        gr.update(visible=k == KIND_FALL))
             kind.change(toggle, kind, [g_amb, g_rel, g_fall])
 
-        with gr.Tab("📂 Thư viện video"):
+            def pick_bg(evt: gr.SelectData):
+                names = bg_names()
+                name = names[evt.index] if evt.index < len(names) else AUTO_BG
+                return name, bg_preview(name)
+            bg_pick.select(pick_bg, None, [bg, bg_prev])
+            bg.change(bg_preview, bg, bg_prev)
+
+        # ---------------- Lịch tự động ----------------
+        with gr.Tab("⏰ Lịch tự động"):
+            gr.Markdown("Đến giờ đã đặt, app tự **nghĩ chủ đề → sáng tác nhạc → dựng video → đăng YouTube**. "
+                        "Ảnh nền lấy lần lượt trong tab 🖼 Ảnh nền.")
             with gr.Row():
-                folder = gr.Dropdown(output_folders(), label="Video đã tạo", scale=4)
+                with gr.Column(scale=5):
+                    a_on = gr.Checkbox(label="✅ Bật lịch tự động", value=st["auto_enabled"])
+                    a_times = gr.Textbox(label="Giờ chạy mỗi ngày", value=st["auto_times"],
+                                         info="Giờ máy, nhiều giờ cách nhau bằng dấu phẩy, vd: 09:00, 21:00")
+                    a_days = gr.CheckboxGroup([(n, i) for i, n in enumerate(scheduler.DAY_NAMES)],
+                                              value=st["auto_days"], label="Ngày trong tuần")
+                    with gr.Row():
+                        a_count = gr.Slider(1, 5, value=st["auto_count"], step=1, label="Số video mỗi lượt")
+                        a_minutes = gr.Slider(10, 180, value=st["auto_minutes"], step=5, label="Mỗi video (phút)")
+                    a_effect = gr.Radio(["grain", "dust", "none"], value=st["auto_effect"], label="Hiệu ứng hình")
+                    a_up = gr.Checkbox(label="📤 Đăng YouTube sau khi làm xong", value=st["auto_upload"])
+                    a_mode = gr.Radio([m for m in MODES if m != "Giờ cụ thể"],
+                                      value=mode_label.get(st["auto_mode"], "Theo khung giờ trống tiếp theo"),
+                                      label="Cách đăng")
+                    a_bg = gr.Checkbox(label="🖥 Chạy cả khi đã tắt giao diện (macOS tự chạy nền, "
+                                             "máy ngủ thì chạy bù khi thức dậy)",
+                                       value=scheduler.launchd_installed())
+                    with gr.Row():
+                        a_save = gr.Button("💾 Lưu lịch", variant="primary")
+                        a_now = gr.Button("▶ Chạy ngay 1 lượt")
+                        a_stop = gr.Button("⏹ Dừng")
+                    a_msg = gr.Markdown()
+                with gr.Column(scale=6):
+                    a_status = gr.Markdown(auto_status_md())
+                    a_log = gr.Textbox(label="Nhật ký lượt gần nhất", value=scheduler.latest_log(), lines=18,
+                                       max_lines=18, autoscroll=True)
+            gr.Markdown("💡 Nên chọn giờ chạy sớm hơn giờ đăng vài tiếng (vd chạy 14:00, đăng 20:00) để kịp dựng "
+                        "và tải video. Khi bật *Chạy cả khi đã tắt giao diện*, máy Mac vẫn cần bật (có thể đang ngủ).",
+                        elem_classes="step-note")
+            a_timer = gr.Timer(20)
+            a_timer.tick(lambda: (auto_status_md(), scheduler.latest_log()), None, [a_status, a_log])
+            a_save.click(save_auto, [a_on, a_times, a_days, a_count, a_minutes, a_effect, a_up, a_mode, a_bg],
+                         [a_msg, a_status])
+            a_now.click(save_auto, [a_on, a_times, a_days, a_count, a_minutes, a_effect, a_up, a_mode, a_bg],
+                        [a_msg, a_status]).then(run_now, None, [a_msg, a_log])
+            a_stop.click(stop, None, a_msg)
+
+        # ---------------- Video đã tạo ----------------
+        with gr.Tab("📂 Video đã tạo"):
+            with gr.Row():
+                folder = gr.Dropdown(output_folders(), label="Chọn video", scale=4)
                 refresh = gr.Button("↻ Làm mới", scale=1)
-                open_btn = gr.Button("Mở trong Finder", scale=1)
+                open_btn = gr.Button("📁 Mở trong Finder", scale=1)
             with gr.Row():
                 with gr.Column(scale=6):
                     lib_video = gr.Video(label="Video", interactive=False)
                     with gr.Row():
                         track = gr.Dropdown([], label="Nghe từng bài (ambient)", scale=2)
                         track_audio = gr.Audio(label="", interactive=False, scale=3)
+                    with gr.Group():
+                        gr.Markdown("### 📤 Đăng lên YouTube")
+                        up_mode = gr.Radio(list(MODES), value="Theo khung giờ trống tiếp theo", label="Cách đăng")
+                        up_at = gr.Textbox(label="Giờ công khai (YYYY-MM-DD HH:MM), dùng khi chọn *Giờ cụ thể*",
+                                           value=next_slot_text)
+                        up_btn = gr.Button("📤 Đăng video này", variant="primary")
+                        up_info = gr.Markdown("Chưa chọn video.")
                 with gr.Column(scale=5):
                     lib_thumb = gr.Image(label="Thumbnail", interactive=False, height=220)
                     lib_title = gr.Textbox(label="Tiêu đề", buttons=["copy"])
                     lib_desc = gr.Textbox(label="Mô tả", lines=10, buttons=["copy"])
                     lib_tags = gr.Textbox(label="Tags (cách nhau bằng dấu phẩy)", buttons=["copy"])
-                    with gr.Row():
-                        save_btn = gr.Button("💾 Lưu thay đổi", variant="primary")
-                        retitle_btn = gr.Button("✍️ Gemini viết lại tiêu đề")
                     retitle_note = gr.Textbox(label="Yêu cầu thêm cho Gemini (tuỳ chọn)",
                                               placeholder="vd: ngắn hơn, nói về đêm mưa")
+                    with gr.Row():
+                        save_btn = gr.Button("💾 Lưu thay đổi", variant="primary")
+                        retitle_btn = gr.Button("✍️ Gemini viết lại")
                     save_msg = gr.Markdown()
-            with gr.Group():
-                gr.Markdown("### 📤 Đăng lên YouTube")
-                with gr.Row():
-                    up_mode = gr.Radio(list(MODES), value="Theo khung giờ trống tiếp theo", label="Cách đăng", scale=3)
-                    up_at = gr.Textbox(label="Giờ công khai (YYYY-MM-DD HH:MM)", value=next_slot_text, scale=1)
-                up_btn = gr.Button("📤 Đăng video này", variant="primary")
-                up_info = gr.Markdown("Chưa chọn video.")
-            gr.Markdown("**Khi đăng:** tải lên ở chế độ *Riêng tư* → đợi kiểm tra bản quyền → công khai. "
-                        "Video ambient dùng ảnh AI: chọn *Altered or synthetic content → Yes*.")
 
             lib_outputs = [lib_video, lib_thumb, lib_title, lib_desc, lib_tags, track, track_audio]
             folder.change(load_folder, folder, lib_outputs).then(upload_info, folder, up_info)
             retitle_btn.click(do_retitle, [folder, retitle_note], [lib_title, lib_desc, lib_tags, save_msg])
             up_btn.click(do_upload, [folder, up_mode, up_at, lib_title, lib_desc, lib_tags], up_info)
             refresh.click(lambda: gr.update(choices=output_folders()), None, folder)
+
             def open_in_finder(n):
                 if n:
                     subprocess.run(["open", str(config.OUTPUT_DIR / n)])
@@ -454,6 +645,21 @@ def build() -> gr.Blocks:
             track.change(lambda t: t, track, track_audio)
             save_btn.click(save_folder, [folder, lib_title, lib_desc, lib_tags], save_msg)
 
+        # ---------------- Ảnh nền ----------------
+        with gr.Tab("🖼 Ảnh nền"):
+            gr.Markdown(f"Ảnh trong thư mục `assets/backgrounds` được dùng lần lượt (ảnh lâu chưa dùng nhất trước). "
+                        "Nên dùng ảnh ngang 16:9, từ 1920×1080 trở lên.")
+            bg_all = gr.Gallery(bg_gallery(), columns=4, height=520, show_label=False, object_fit="cover")
+            with gr.Row():
+                bg_files = gr.File(label="Thêm ảnh mới", file_count="multiple", file_types=["image"], scale=3)
+                with gr.Column(scale=1):
+                    bg_add = gr.Button("➕ Thêm vào thư viện", variant="primary")
+                    bg_open = gr.Button("📁 Mở thư mục ảnh")
+                    bg_msg = gr.Markdown()
+            bg_add.click(add_backgrounds, bg_files, [bg_all, bg_msg, bg, bg_pick])
+            bg_open.click(lambda: subprocess.run(["open", str(imaging.BG_DIR)]) and None, None, None)
+
+        # ---------------- Thư viện MIDI ----------------
         with gr.Tab("🎼 Thư viện MIDI"):
             gr.Markdown("Bài cổ điển dùng cho **Thư giãn** và **Phím đàn rơi**. Tìm file `.mid` tại "
                         "[Mutopia Project](https://www.mutopiaproject.org) (lọc Instrument = Piano), "
@@ -479,58 +685,38 @@ def build() -> gr.Blocks:
                         gr.update(choices=piece_choices()), gr.update(choices=composer_choices()))
             add_btn.click(add_midi, [up, m_title, m_comp, m_lic, m_src], [table, add_msg, piece, composer])
 
-        with gr.Tab("🤖 Tự động hàng loạt"):
-            gr.Markdown("Gemini nghĩ ra các chủ đề cảm xúc khác nhau → app sáng tác nhạc, dựng video → "
-                        "đăng lên YouTube hẹn giờ vào các khung giờ trống liên tiếp (vd mỗi tối 20:00).")
-            with gr.Row():
-                b_count = gr.Slider(1, 14, value=3, step=1, label="Số video")
-                b_minutes = gr.Slider(10, 180, value=50, step=5, label="Mỗi video (phút)")
-                b_effect = gr.Radio(["grain", "dust", "none"], value="grain", label="Hiệu ứng hình")
-            with gr.Row():
-                b_noai = gr.Checkbox(label="Không dùng ảnh Gemini", value=not env.get("GEMINI_API_KEY"))
-                b_up = gr.Checkbox(label="📤 Đăng YouTube", value=True)
-                b_mode = gr.Radio([m for m in MODES if m != "Giờ cụ thể"], value="Theo khung giờ trống tiếp theo",
-                                  label="Cách đăng")
-            with gr.Row():
-                b_go = gr.Button("🤖 Bắt đầu", variant="primary", size="lg")
-                b_stop = gr.Button("⏹ Dừng", size="lg")
-            b_status = gr.Markdown("Sẵn sàng.")
-            b_log = gr.Textbox(lines=16, max_lines=16, show_label=False, autoscroll=True)
-            b_go.click(run_batch, [b_count, b_minutes, b_effect, b_noai, b_up, b_mode], [b_status, b_log])
-            b_stop.click(stop, None, b_status)
-
+        # ---------------- YouTube ----------------
         with gr.Tab("📺 YouTube"):
-            st = settings.load()
             with gr.Row():
                 with gr.Column():
                     gr.Markdown("### Tài khoản")
                     cred_md = gr.Markdown(cred_status())
                     acc = gr.Dropdown(account_choices(), value=youtube.active_account() or None,
-                                      label="Tài khoản đang dùng")
-                    login_btn = gr.Button("🔑 Đăng nhập tài khoản YouTube")
+                                      label="Kênh đang dùng")
+                    login_btn = gr.Button("🔑 Đăng nhập thêm kênh YouTube")
                     acc_msg = gr.Markdown()
                     with gr.Accordion("Chưa có client_secret.json? Làm 1 lần theo hướng dẫn", open=False):
                         gr.Markdown(CLIENT_SECRET_HELP)
                         secret_file = gr.File(label="Tải lên client_secret.json", file_types=[".json"])
                 with gr.Column():
                     gr.Markdown("### Lịch đăng")
-                    slots = gr.Textbox(label="Khung giờ đăng mỗi ngày (giờ máy)", value=st["slots"],
+                    slots = gr.Textbox(label="Giờ công khai video mỗi ngày (giờ máy)", value=st["slots"],
                                        info="Nhiều khung cách nhau bằng dấu phẩy, vd: 08:00, 20:00")
-                    lead = gr.Number(label="Đăng trước giờ công khai ít nhất (phút)", value=st["lead_minutes"],
+                    lead = gr.Number(label="Tải lên trước giờ công khai ít nhất (phút)", value=st["lead_minutes"],
                                      precision=0, info="Để YouTube kịp xử lý video dài")
                     mode = gr.Radio([m for m in MODES if m != "Giờ cụ thể"],
-                                    value={v: k for k, v in MODES.items()}.get(st["mode"], "Theo khung giờ trống tiếp theo"),
-                                    label="Chế độ mặc định khi tự đăng")
-                    synth = gr.Checkbox(label="Khai báo 'nội dung do AI tạo' (khuyên bật khi dùng ảnh Gemini)",
+                                    value=mode_label.get(st["mode"], "Theo khung giờ trống tiếp theo"),
+                                    label="Cách đăng mặc định (tab Tạo video)")
+                    synth = gr.Checkbox(label="Khai báo 'nội dung do AI tạo' (nên bật khi ảnh nền là ảnh AI)",
                                         value=st["synthetic"])
                     note = gr.Textbox(label="Ghi chú cho Gemini khi viết tiêu đề", value=st["title_note"],
                                       placeholder="vd: tiêu đề ngắn, hay nhắc tới đêm khuya và mưa")
-                    save_sched = gr.Button("💾 Lưu lịch", variant="primary")
+                    save_sched = gr.Button("💾 Lưu", variant="primary")
                     sched_msg = gr.Markdown(f"Khung giờ trống tiếp theo: **{next_slot_text()}**")
             gr.Markdown("### Đã đăng")
             up_table = gr.Dataframe(uploads_rows(), headers=["Lịch / trạng thái", "Tiêu đề", "Link", "Tài khoản"],
-                                    interactive=False)
-            refresh_up = gr.Button("↻ Làm mới")
+                                    interactive=False, wrap=True)
+            refresh_up = gr.Button("↻ Làm mới", size="sm")
 
             def save_schedule(a, sl, ld, md, sy, nt):
                 if not youtube.parse_slots(sl):
@@ -541,6 +727,7 @@ def build() -> gr.Blocks:
                     youtube.set_active(a)
                 return f"✓ Đã lưu. Khung giờ trống tiếp theo: **{next_slot_text()}**"
             save_sched.click(save_schedule, [acc, slots, lead, mode, synth, note], sched_msg)
+
             def choose_account(a):
                 if a:
                     youtube.set_active(a)
@@ -550,9 +737,10 @@ def build() -> gr.Blocks:
             secret_file.change(save_client_secret, secret_file, acc_msg).then(cred_status, None, cred_md)
             refresh_up.click(uploads_rows, None, up_table)
 
+        # ---------------- Cài đặt ----------------
         with gr.Tab("⚙️ Cài đặt"):
             gr.Markdown("Lấy Gemini API key miễn phí tại [Google AI Studio](https://aistudio.google.com/apikey). "
-                        "Không có key app vẫn chạy, nhưng dùng nền đơn giản và mô tả theo mẫu.")
+                        "Không có key app vẫn chạy, nhưng tiêu đề/mô tả sẽ theo mẫu có sẵn.")
             key = gr.Textbox(label="Gemini API key", type="password", value=env.get("GEMINI_API_KEY", ""))
             with gr.Row():
                 tmodel = gr.Textbox(label="Model viết chữ", value=env.get("GEMINI_TEXT_MODEL", config.GEMINI_TEXT_MODEL))
@@ -562,11 +750,14 @@ def build() -> gr.Blocks:
                 test = gr.Button("Kiểm tra key")
             env_msg = gr.Markdown()
             gr.Markdown(soundfont_status())
-            save_env.click(write_env, [key, tmodel, imodel], env_msg).then(
-                lambda k: gr.update(value=not k.strip()), key, no_ai)
+            save_env.click(write_env, [key, tmodel, imodel], env_msg)
             test.click(test_key, [key, tmodel], env_msg)
 
-        inputs = [kind, mood, amb_minutes, scene, custom_scene, seed, amb_effect, amb_thumb,
+        ov_refresh.click(lambda: (overview_md(), recent_uploads_rows()), None, [ov, ov_ups])
+        app.load(lambda: (overview_md(), recent_uploads_rows(), gr.update(choices=[AUTO_BG] + bg_names()),
+                          bg_gallery(), bg_gallery()), None, [ov, ov_ups, bg, bg_pick, bg_all])
+
+        inputs = [kind, bg, mood, amb_minutes, scene, custom_scene, seed, amb_effect, amb_thumb,
                   theme, rel_minutes, composer, rel_effect, bright, piece, visualizer, no_ai, auto_up]
         go.click(generate, inputs, [status, log, out_video, out_thumb, out_title, out_desc, out_tags, folder])
         stop_btn.click(stop, None, status)
@@ -574,7 +765,9 @@ def build() -> gr.Blocks:
 
 
 def main():
-    build().queue().launch(inbrowser=not os.getenv("PIANOTUBE_NO_BROWSER"), server_port=7860, allowed_paths=[str(config.OUTPUT_DIR)],
+    scheduler.start_watcher(read_env)
+    build().queue().launch(inbrowser=not os.getenv("PIANOTUBE_NO_BROWSER"), server_port=7860,
+                           allowed_paths=[str(config.OUTPUT_DIR), str(imaging.BG_DIR)],
                            theme=gr.themes.Soft(primary_hue="indigo"), css=CSS)
 
 
