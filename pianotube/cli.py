@@ -5,6 +5,7 @@
   pianotube library add FILE.mid --title ... --composer ... --license ... --source URL
   pianotube library list
   pianotube autorun [--force]
+  pianotube story list | voices | make <slug> --clips DIR [--upload]
 """
 import argparse
 import datetime as dt
@@ -348,6 +349,39 @@ def cmd_autorun(args):
     scheduler.autorun(force=args.force)
 
 
+def cmd_story(args):
+    """Truyện audio: liệt kê truyện, xem giọng CIT, làm video."""
+    from .story import pipeline
+    if args.action == "list":
+        stories = pipeline.list_stories()
+        for s in stories:
+            print(f"{s.slug:<45} {s.words:>6} từ  ~{pipeline.minutes(s):>4.0f} phút  {s.title}")
+        if not stories:
+            print("Chưa có truyện nào.")
+    elif args.action == "voices":
+        st = pipeline.story_status()
+        print(("✅ CIT Voice Studio: sẵn sàng" if st["cit_ok"] else f"⚠️ CIT Voice Studio: {st['cit']}"))
+        for v in st["voices"]:
+            print(f"  • {v}")
+        print(f"📖 {st['stories']} truyện" + (f" ({st['error']})" if st["error"] else ""))
+    else:
+        if not (args.slug and args.clips):
+            raise SystemExit("story make cần <slug> và --clips DIR")
+        wm = None
+        if args.wm_text or args.wm_logo:
+            from .story.watermark import WatermarkConfig
+            wm = WatermarkConfig(template=args.wm_template, text=args.wm_text or "", subtext=args.wm_subtext or "",
+                                 logo=Path(args.wm_logo) if args.wm_logo else None, position=args.wm_position,
+                                 opacity=args.wm_opacity, scale=args.wm_scale, color=args.wm_color)
+        music = None if args.music.lower() == "none" else args.music
+        pipeline.make(args.slug, args.clips, voice=args.voice, speed=args.speed,
+                      landscape=not args.no_landscape, vertical=not args.no_vertical,
+                      vertical_mode=args.vertical_mode, vertical_seconds=args.vertical_seconds,
+                      subtitles_landscape=args.subs_landscape, subtitles_vertical=not args.no_subs_vertical,
+                      music=music, music_volume=args.music_volume, watermark=wm,
+                      upload=args.upload, upload_mode=args.upload_mode)
+
+
 def add_upload_args(p):
     p.add_argument("--upload", action="store_true", help="đăng YouTube ngay khi làm xong")
     p.add_argument("--upload-mode", choices=["slot", "private", "unlisted", "public", "at"],
@@ -430,6 +464,34 @@ def main():
     ar = sub.add_parser("autorun", help="chạy lịch tự động (launchd/giao diện gọi lệnh này)")
     ar.add_argument("--force", action="store_true", help="chạy ngay một lượt, không cần tới giờ")
     ar.set_defaults(func=cmd_autorun)
+
+    stp = sub.add_parser("story", help="truyện audio: giọng đọc CIT + video nền → video ngang/dọc")
+    stp.add_argument("action", choices=["list", "voices", "make"])
+    stp.add_argument("slug", nargs="?", help="tên thư mục truyện (xem: pianotube story list)")
+    stp.add_argument("--clips", help="thư mục video nền")
+    stp.add_argument("--voice", help='giọng CIT (mặc định "Giọng của tôi")')
+    stp.add_argument("--speed", type=float, default=1.0)
+    stp.add_argument("--no-landscape", action="store_true", help="không làm video ngang 16:9")
+    stp.add_argument("--no-vertical", action="store_true", help="không làm video dọc 9:16")
+    stp.add_argument("--vertical-mode", choices=["parts", "teaser", "full"], default="parts",
+                     help="parts = chia nhiều phần | teaser = chỉ đoạn mở đầu | full = cả truyện")
+    stp.add_argument("--vertical-seconds", type=float, default=90, help="độ dài mỗi phần video dọc (giây)")
+    stp.add_argument("--subs-landscape", action="store_true", help="thêm phụ đề cho video ngang")
+    stp.add_argument("--no-subs-vertical", action="store_true", help="bỏ phụ đề video dọc")
+    stp.add_argument("--music", default="auto", help="auto (piano nhẹ) | none | đường dẫn file nhạc")
+    stp.add_argument("--music-volume", type=float, default=0.12)
+    stp.add_argument("--wm-template", default="pill")
+    stp.add_argument("--wm-text", default="")
+    stp.add_argument("--wm-subtext", default="")
+    stp.add_argument("--wm-logo")
+    stp.add_argument("--wm-position", default="top-right")
+    stp.add_argument("--wm-opacity", type=float, default=0.85)
+    stp.add_argument("--wm-scale", type=float, default=1.0)
+    stp.add_argument("--wm-color", default="#ffffff")
+    stp.add_argument("--upload", action="store_true", help="đăng YouTube (video ngang + từng phần dọc)")
+    stp.add_argument("--upload-mode", choices=["slot", "private", "unlisted", "public"],
+                     help="mặc định theo cài đặt (slot = mỗi video một khung giờ trống)")
+    stp.set_defaults(func=cmd_story)
 
     args = ap.parse_args()
     if args.cmd == "library" and args.action == "add" and not (args.file and args.title and args.composer):

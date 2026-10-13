@@ -185,12 +185,15 @@ def overview_md() -> str:
     auto = (f"Bật · lượt tới **{nxt:%H:%M %d/%m}**" if nxt else "Bật, nhưng chưa có giờ/ngày hợp lệ") \
         if s["auto_enabled"] else "Tắt"
     bg_mode = " · chạy nền macOS ✓" if scheduler.launchd_installed() else ""
+    cit_ok, n_story = _cit_health()[0], len(_stories())
     rows = [
         f"| {_ok(sf)} | Âm thanh piano | {sf or 'Chưa có soundfont: chạy `scripts/setup_assets.sh`'} |",
         f"| {_ok(key)} | Gemini (viết tiêu đề, mô tả) | {'Đã có key' if key else 'Chưa có key: vào tab ⚙️ Cài đặt'} |",
         f"| {_ok(acc)} | Kênh YouTube | {acc or 'Chưa đăng nhập: vào tab 📺 YouTube'} |",
         f"| {_ok(n_bg)} | Ảnh nền | {f'{n_bg} ảnh' if n_bg else 'Chưa có ảnh: vào tab 🖼 Ảnh nền'} |",
         f"| {_ok(s['auto_enabled'])} | Lịch tự động | {auto}{bg_mode} |",
+        f"| {_ok(cit_ok)} | Truyện audio | CIT Voice Studio {'sẵn sàng' if cit_ok else 'chưa mở'} · "
+        f"{n_story} truyện |",
         f"| 🗓 | Khung giờ đăng trống tiếp theo | {next_slot_text() or '—'} |",
     ]
     return "| | Mục | Trạng thái |\n|---|---|---|\n" + "\n".join(rows)
@@ -427,6 +430,305 @@ def save_auto(enabled, times_txt, days, count, minutes, effect, upload, mode_lab
     return msg, auto_status_md()
 
 
+# ---------- truyện audio ----------
+# Các module pianotube.story.* import khi cần: thiếu module hoặc CIT chưa mở thì giao diện vẫn chạy.
+
+VMODES = {"Chia nhiều phần": "parts", "Chỉ đoạn mở đầu (teaser)": "teaser", "Cả truyện": "full"}
+MUSIC_AUTO, MUSIC_NONE = "Piano nhẹ tự động", "Không nhạc"
+POS_VI = {"top-left": "↖ Trên trái", "top-center": "↑ Trên giữa", "top": "↑ Trên giữa", "top-right": "↗ Trên phải",
+          "center": "• Giữa", "bottom-left": "↙ Dưới trái", "bottom-center": "↓ Dưới giữa",
+          "bottom": "↓ Dưới giữa", "bottom-right": "↘ Dưới phải"}
+STORY_UI = config.OUTPUT_DIR / ".cache" / "story_ui"
+DEFAULT_VOICE = "Giọng của tôi"
+
+
+def _story(name: str):
+    """Module pianotube.story.<name> hoặc None nếu chưa có / lỗi import."""
+    import importlib
+    try:
+        return importlib.import_module(f"pianotube.story.{name}")
+    except Exception:
+        return None
+
+
+def _cit_health():
+    v = _story("voice")
+    if not v:
+        return False, "chưa có module giọng đọc"
+    try:
+        v.health(timeout=2)
+        return True, v.BASE_URL
+    except getattr(v, "CitBusy", ()) as e:
+        return True, "đang bận tạo giọng"
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+def _stories() -> list:
+    pl = _story("pipeline")
+    try:
+        return pl.list_stories() if pl else []
+    except Exception:
+        return []
+
+
+def story_choices() -> list:
+    pl = _story("pipeline")
+    return [(f"{s.title} · {s.words} từ · ~{pl.minutes(s):.0f} phút", s.slug) for s in _stories()]
+
+
+def story_status_md() -> str:
+    ok, info = _cit_health()
+    cit = (("⏳ **CIT Voice Studio** đang bận tạo giọng" if info == "đang bận tạo giọng"
+            else "✅ **CIT Voice Studio** sẵn sàng") if ok else f"⚠️ **CIT Voice Studio** chưa mở ({info})")
+    return f"{cit} · 📖 **{len(_stories())}** truyện"
+
+
+def voice_choices() -> list:
+    names = []
+    v = _story("voice")
+    if v:
+        try:
+            names = [x.get("name") or x.get("id") for x in v.voices()]
+        except Exception:
+            pass
+    return names if DEFAULT_VOICE in names else [DEFAULT_VOICE] + names
+
+
+def open_cit():
+    v = _story("voice")
+    if not v:
+        raise gr.Error("Chưa có module giọng đọc (pianotube/story/voice.py).")
+    try:
+        v.ensure_running(log=lambda *_: None)
+    except Exception as e:
+        raise gr.Error(f"Không mở được CIT Voice Studio: {e}")
+    cur = settings.load()["story_voice"]
+    return story_status_md(), gr.update(choices=voice_choices(), value=cur)
+
+
+def story_info(slug: str) -> str:
+    if not slug:
+        return "Chưa chọn truyện."
+    pl = _story("pipeline")
+    try:
+        s = pl.load_story(slug)
+    except Exception as e:
+        return f"⚠️ Không đọc được truyện: {e}"
+    md = [f"### {s.title}", f"{s.words} từ · khoảng **{pl.minutes(s):.0f} phút** đọc · {len(s.parts)} phần"]
+    if s.yt_titles:
+        md.append(f"**Tiêu đề YouTube:** {s.yt_titles[0]}")
+    if s.hooks:
+        md.append(f"**Hook:** _{s.hooks[0]}_")
+    if s.description:
+        d = s.description.strip()
+        md.append("> " + (d[:500] + "…" if len(d) > 500 else d).replace("\n", "\n> "))
+    if s.hashtags:
+        md.append(" ".join(s.hashtags))
+    return "\n\n".join(md)
+
+
+def pick_clips_folder():
+    """Hộp thoại chọn thư mục của macOS (chạy trên máy này)."""
+    r = subprocess.run(["osascript", "-e", 'POSIX path of (choose folder with prompt "Chọn thư mục video nền")'],
+                       capture_output=True, text=True)
+    path = r.stdout.strip()
+    return path.rstrip("/") if r.returncode == 0 and path else gr.update()
+
+
+def _frame(clip: Path, width: int) -> Path | None:
+    """Trích 1 khung hình của video vào cache (thư mục output đã được phép hiển thị)."""
+    import hashlib
+    STORY_UI.mkdir(parents=True, exist_ok=True)
+    key = hashlib.md5(f"{clip}{clip.stat().st_mtime}{width}".encode()).hexdigest()[:16]
+    out = STORY_UI / f"{key}.jpg"
+    for ss in ("1", "0"):
+        if out.exists():
+            break
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", ss, "-i", str(clip), "-frames:v", "1",
+                        "-vf", f"scale={width}:-2", str(out)], capture_output=True)
+    return out if out.exists() else None
+
+
+def _clips(folder: str) -> list:
+    r = _story("render")
+    if not (r and folder and Path(folder).expanduser().is_dir()):
+        return []
+    try:
+        return r.collect_clips(Path(folder).expanduser())
+    except Exception:
+        return []
+
+
+def clips_info(folder: str):
+    if not folder:
+        return "Chưa chọn thư mục video nền.", []
+    if not Path(folder).expanduser().is_dir():
+        return f"⚠️ Không thấy thư mục `{folder}`", []
+    if not _story("render"):
+        return "⚠️ Chưa có module dựng video (pianotube/story/render.py).", []
+    clips = _clips(folder)
+    if not clips:
+        return "⚠️ Thư mục không có video nào (.mp4, .mov…).", []
+    thumbs = [(str(f), c.name) for c in clips[:8] if (f := _frame(c, 320))]
+    return f"✅ Tìm thấy **{len(clips)}** video nền" + (" (xem trước 8 video đầu)" if len(clips) > 8 else ""), thumbs
+
+
+def _wm_background(folder: str) -> Path | None:
+    clips = _clips(folder)
+    if clips:
+        f = _frame(clips[0], 1280)
+        if f:
+            return f
+    bgs = imaging.local_backgrounds()
+    return bgs[0] if bgs else None
+
+
+def _hex(color) -> str:
+    c = str(color or "#ffffff").strip()
+    m = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", c)
+    return "#%02x%02x%02x" % tuple(int(float(x)) for x in m.groups()) if m else c
+
+
+def wm_dict(template, text, subtext, logo, pos, opacity, scale, color) -> dict:
+    return {"template": template or "pill", "text": text or "", "subtext": subtext or "", "logo": logo or None,
+            "position": pos or "top-right", "opacity": float(opacity), "scale": float(scale), "color": _hex(color)}
+
+
+def _wm_cfg(d: dict):
+    w = _story("watermark")
+    if not w:
+        return None
+    return w.WatermarkConfig(**{**d, "logo": Path(d["logo"]) if d.get("logo") else None})
+
+
+def wm_previews(folder, template, text, subtext, logo, pos, opacity, scale, color):
+    w = _story("watermark")
+    if not w:
+        return None, None
+    try:
+        cfg, bg = _wm_cfg(wm_dict(template, text, subtext, logo, pos, opacity, scale, color)), _wm_background(folder)
+        return w.preview(cfg, 1280, 720, background=bg), w.preview(cfg, 720, 1280, background=bg)
+    except Exception as e:
+        print(f"[watermark preview] {e}")
+        return None, None
+
+
+def wm_gallery(folder, text, subtext, logo, pos, opacity, scale, color) -> list:
+    w = _story("watermark")
+    if not w:
+        return []
+    bg, items = _wm_background(folder), []
+    for key, t in w.TEMPLATES.items():
+        try:
+            cfg = _wm_cfg(wm_dict(key, text or "Tên kênh", subtext, logo, pos, opacity, scale, color))
+            items.append((w.preview(cfg, 640, 360, background=bg), t["name"]))
+        except Exception as e:
+            print(f"[watermark {key}] {e}")
+    return items
+
+
+def wm_template_choices() -> list:
+    w = _story("watermark")
+    return [(t["name"], k) for k, t in w.TEMPLATES.items()] if w else []
+
+
+def wm_position_choices() -> list:
+    w = _story("watermark")
+    return [(POS_VI.get(p, p), p) for p in w.POSITIONS] if w else [(v, k) for k, v in POS_VI.items()
+                                                                     if k not in ("top", "bottom")]
+
+
+def _keep_logo(logo) -> str:
+    """Chép logo vào cache (được phép hiển thị) để lần sau mở lại vẫn còn."""
+    if not logo:
+        return ""
+    import shutil
+    src = Path(logo)
+    dst_dir = STORY_UI / "logos"
+    if dst_dir in src.parents:
+        return str(src)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name
+    shutil.copy(src, dst)
+    return str(dst)
+
+
+def story_status_line(line: str, current: str) -> str:
+    if line.startswith(("frame=", "size=")):
+        m = re.search(r"time=(\S+)", line)
+        return f"🎬 Đang dựng video… {m.group(1) if m else ''}"
+    s = line.strip()
+    if s.startswith(("📖", "🎙", "🎚", "🎞", "🎬", "📝", "🚀", "✅", "⚠️")):
+        return s
+    return current
+
+
+def story_results(folder: str):
+    d = Path(folder)
+    video = d / "video.mp4"
+    shorts = [(str(p), "Phần " + p.parent.name.rsplit("_phan", 1)[-1].lstrip("0"))
+              for p in sorted(d.glob("shorts/*/video.mp4"))]
+    return (str(video) if video.exists() else None, shorts,
+            read_text(d / "title.txt"), read_text(d / "description.txt"), str(d))
+
+
+def story_generate(slug, voice, speed, clips, land, vert, vmode, vsec, subs_l, subs_v, music, mvol,
+                   wm_on, template, text, subtext, logo, pos, opacity, scale, color, auto_up):
+    if not slug:
+        raise gr.Error("Hãy chọn một truyện ở bước ①.")
+    if not (clips and Path(clips).expanduser().is_dir()):
+        raise gr.Error("Hãy chọn thư mục video nền ở bước ③.")
+    if not (land or vert):
+        raise gr.Error("Chọn ít nhất một định dạng: video ngang hoặc video dọc.")
+    if not _lock.acquire(blocking=False):
+        raise gr.Error("Đang có một tác vụ khác chạy. Đợi xong hoặc bấm Dừng.")
+    try:
+        wm = wm_dict(template, text, subtext, _keep_logo(logo), pos, opacity, scale, color)
+        settings.save(story_clips_dir=clips, story_voice=voice or DEFAULT_VOICE, story_wm={**wm, "enabled": wm_on})
+        argv = ["story", "make", slug, "--clips", clips, "--voice", voice or DEFAULT_VOICE, "--speed", str(speed),
+                "--vertical-mode", VMODES.get(vmode, "parts"), "--vertical-seconds", str(vsec),
+                "--music", "auto" if music == MUSIC_AUTO else "none", "--music-volume", str(mvol)]
+        argv += [] if land else ["--no-landscape"]
+        argv += [] if vert else ["--no-vertical"]
+        argv += ["--subs-landscape"] if subs_l else []
+        argv += [] if subs_v else ["--no-subs-vertical"]
+        if wm_on and (wm["text"] or wm["logo"]):
+            argv += ["--wm-template", wm["template"], "--wm-text", wm["text"], "--wm-subtext", wm["subtext"],
+                     "--wm-position", wm["position"], "--wm-opacity", str(wm["opacity"]),
+                     "--wm-scale", str(wm["scale"]), "--wm-color", wm["color"]]
+            argv += ["--wm-logo", wm["logo"]] if wm["logo"] else []
+        if auto_up:
+            argv.append("--upload")
+
+        log, status, folder, ups = [], "⏳ Bắt đầu…", None, []
+        yield status, "", None, [], "", "", ""
+        for line in run_cli(argv):
+            if line.startswith("__EXIT__"):
+                if line != "__EXIT__0" or not folder:
+                    status = "✗ Có lỗi hoặc đã dừng. Xem nhật ký bên dưới."
+                break
+            if not line.startswith(("frame=", "size=")):
+                log.append(line)
+            status = story_status_line(line, status)
+            m = re.search(r"✓ Xong: (.+)$", line)
+            if m:
+                folder = m.group(1).strip()
+                status = "✅ Đã tạo xong video" + (", đang đăng YouTube…" if auto_up else "")
+                yield status, "\n".join(log[-80:]), *story_results(folder)
+                continue
+            if line.startswith(("📤", "✗ Đăng")):
+                ups.append(line)
+            yield status, "\n".join(log[-80:]), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+        if folder:
+            msg = f"✅ Xong! Thư mục: `{Path(folder).name}`" + ("  \n" + "  \n".join(ups) if ups else "")
+            yield msg, "\n".join(log[-80:]), *story_results(folder)
+        else:
+            yield status, "\n".join(log[-80:]), gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+    finally:
+        _lock.release()
+
+
 def stop():
     p = _proc["p"]
     if p and p.poll() is None:
@@ -558,6 +860,132 @@ def build() -> gr.Blocks:
                 return name, bg_preview(name)
             bg_pick.select(pick_bg, None, [bg, bg_prev])
             bg.change(bg_preview, bg, bg_prev)
+
+        # ---------------- Truyện audio ----------------
+        with gr.Tab("📖 Truyện audio"):
+            wm_st = st.get("story_wm") or {}
+            tpl_choices, pos_choices = wm_template_choices(), wm_position_choices()
+            with gr.Row():
+                s_status_top = gr.Markdown(story_status_md())
+                s_cit_btn = gr.Button("🎙 Mở CIT Voice Studio", size="sm", scale=0)
+            with gr.Row():
+                with gr.Column(scale=5):
+                    with gr.Row():
+                        sch = story_choices()
+                        s_story = gr.Dropdown(sch, value=sch[0][1] if sch else None, label="① Chọn truyện", scale=5,
+                                              info="Truyện viết bằng công cụ write-story")
+                        s_refresh = gr.Button("↻", scale=0, min_width=48)
+                    s_info = gr.Markdown("Chưa chọn truyện.")
+
+                    gr.Markdown("**② Giọng đọc**")
+                    with gr.Row():
+                        vch = voice_choices()
+                        s_voice = gr.Dropdown(vch, value=st["story_voice"] if st["story_voice"] in vch else DEFAULT_VOICE,
+                                              label="Giọng (CIT Voice Studio)", allow_custom_value=True, scale=3)
+                        s_speed = gr.Slider(0.8, 1.3, value=1.0, step=0.05, label="Tốc độ đọc", scale=2)
+
+                    gr.Markdown("**③ Thư mục video nền**")
+                    with gr.Row():
+                        s_clips = gr.Textbox(value=st["story_clips_dir"], label="Đường dẫn thư mục", scale=4,
+                                             placeholder="/Users/…/Videos/b-roll")
+                        s_pick = gr.Button("📁 Chọn thư mục…", scale=1)
+                    s_clips_md = gr.Markdown()
+                    s_clips_gal = gr.Gallery(columns=4, height=170, allow_preview=False, show_label=False,
+                                             object_fit="cover")
+
+                    gr.Markdown("**④ Định dạng**")
+                    with gr.Row():
+                        s_land = gr.Checkbox(label="Video ngang 16:9 (YouTube)", value=True)
+                        s_vert = gr.Checkbox(label="Video dọc 9:16 (Reels/Shorts)", value=True)
+                    with gr.Group():
+                        s_vmode = gr.Radio(list(VMODES), value="Chia nhiều phần", label="Video dọc")
+                        s_vsec = gr.Slider(30, 180, value=90, step=5, label="Mỗi phần dọc dài (giây)")
+                    with gr.Row():
+                        s_subs_l = gr.Checkbox(label="Phụ đề video ngang", value=False)
+                        s_subs_v = gr.Checkbox(label="Phụ đề video dọc", value=True)
+                    with gr.Row():
+                        s_music = gr.Radio([MUSIC_AUTO, MUSIC_NONE], value=MUSIC_AUTO, label="Nhạc nền", scale=2)
+                        s_mvol = gr.Slider(0.0, 0.4, value=0.12, step=0.01, label="Âm lượng nhạc", scale=2)
+
+                    with gr.Accordion("⑤ Watermark (logo / tên kênh)", open=bool(wm_st.get("enabled"))):
+                        s_wm_on = gr.Checkbox(label="Thêm watermark", value=bool(wm_st.get("enabled")))
+                        s_tpl = gr.Dropdown(tpl_choices, label="Mẫu", info="Bấm vào một mẫu bên dưới để chọn",
+                                            value=wm_st.get("template") if wm_st.get("template") in
+                                            [k for _, k in tpl_choices] else (tpl_choices[0][1] if tpl_choices else None))
+                        s_tpl_gal = gr.Gallery(columns=3, height=260, allow_preview=False, show_label=False,
+                                               object_fit="contain")
+                        with gr.Row():
+                            s_wm_text = gr.Textbox(label="Chữ chính", value=wm_st.get("text", ""),
+                                                   placeholder="vd: Truyện Đêm Khuya")
+                            s_wm_sub = gr.Textbox(label="Chữ phụ", value=wm_st.get("subtext", ""),
+                                                  placeholder="vd: @kenhcuaban")
+                        logo0 = wm_st.get("logo")
+                        s_wm_logo = gr.Image(label="Logo (tuỳ chọn, nên dùng PNG nền trong)", type="filepath",
+                                             height=140, value=logo0 if logo0 and Path(logo0).exists() else None)
+                        with gr.Row():
+                            s_wm_pos = gr.Dropdown(pos_choices, value=wm_st.get("position", "top-right"),
+                                                   label="Vị trí")
+                            s_wm_color = gr.ColorPicker(value=wm_st.get("color", "#ffffff"), label="Màu chữ")
+                        with gr.Row():
+                            s_wm_op = gr.Slider(0.2, 1.0, value=wm_st.get("opacity", 0.85), step=0.05,
+                                                label="Độ đậm")
+                            s_wm_scale = gr.Slider(0.5, 2.0, value=wm_st.get("scale", 1.0), step=0.05,
+                                                   label="Kích thước")
+                        with gr.Row():
+                            s_prev_l = gr.Image(label="Xem trước 16:9", interactive=False, height=200, scale=3)
+                            s_prev_v = gr.Image(label="Xem trước 9:16", interactive=False, height=200, scale=1)
+
+                    s_up = gr.Checkbox(label="📤 Tự đăng YouTube khi xong (video ngang + từng phần dọc, "
+                                             "theo lịch đăng ở tab 📺 YouTube)", value=False)
+                    with gr.Row():
+                        s_go = gr.Button("▶ Tạo video truyện", variant="primary", size="lg")
+                        s_stop = gr.Button("⏹ Dừng", size="lg")
+
+                with gr.Column(scale=6):
+                    s_status = gr.Markdown("Sẵn sàng.", elem_id="status")
+                    s_video = gr.Video(label="Video ngang 16:9", interactive=False)
+                    s_shorts = gr.Gallery(label="Video dọc 9:16", columns=4, height=360, object_fit="contain")
+                    s_title = gr.Textbox(label="Tiêu đề", buttons=["copy"])
+                    s_desc = gr.Textbox(label="Mô tả", lines=6, buttons=["copy"])
+                    s_folder = gr.State("")
+                    s_open = gr.Button("📁 Mở thư mục kết quả", size="sm")
+                    with gr.Accordion("Nhật ký", open=False):
+                        s_log = gr.Textbox(lines=14, max_lines=14, show_label=False, autoscroll=True)
+
+            def refresh_stories(cur):
+                ch = story_choices()
+                return gr.update(choices=ch, value=cur if cur in [v for _, v in ch] else None), story_status_md()
+            s_refresh.click(refresh_stories, s_story, [s_story, s_status_top])
+            s_story.change(story_info, s_story, s_info)
+            s_cit_btn.click(open_cit, None, [s_status_top, s_voice])
+
+            wm_inputs = [s_tpl, s_wm_text, s_wm_sub, s_wm_logo, s_wm_pos, s_wm_op, s_wm_scale, s_wm_color]
+            gal_inputs = [s_clips, s_wm_text, s_wm_sub, s_wm_logo, s_wm_pos, s_wm_op, s_wm_scale, s_wm_color]
+
+            def refresh_wm(folder, *w):
+                return (*wm_previews(folder, *w), wm_gallery(folder, *w[1:]))
+            s_pick.click(pick_clips_folder, None, s_clips)
+            s_clips.change(clips_info, s_clips, [s_clips_md, s_clips_gal], trigger_mode="always_last") \
+                .then(refresh_wm, [s_clips, *wm_inputs], [s_prev_l, s_prev_v, s_tpl_gal])
+            for c in (s_tpl, s_wm_pos, s_wm_op, s_wm_scale):
+                c.change(lambda f, *w: wm_previews(f, *w), [s_clips, *wm_inputs], [s_prev_l, s_prev_v],
+                         trigger_mode="always_last", show_progress="hidden")
+            for c in (s_wm_text, s_wm_sub, s_wm_logo, s_wm_color):
+                c.change(refresh_wm, [s_clips, *wm_inputs], [s_prev_l, s_prev_v, s_tpl_gal],
+                         trigger_mode="always_last", show_progress="hidden")
+
+            def pick_tpl(evt: gr.SelectData):
+                keys = [k for _, k in wm_template_choices()]
+                return (keys[evt.index] if evt.index < len(keys) else gr.update()), True
+            s_tpl_gal.select(pick_tpl, None, [s_tpl, s_wm_on])
+
+            s_inputs = [s_story, s_voice, s_speed, s_clips, s_land, s_vert, s_vmode, s_vsec, s_subs_l, s_subs_v,
+                        s_music, s_mvol, s_wm_on, *wm_inputs, s_up]
+            s_go.click(story_generate, s_inputs, [s_status, s_log, s_video, s_shorts, s_title, s_desc, s_folder])
+            s_stop.click(stop, None, s_status)
+            s_open.click(lambda f: subprocess.run(["open", f or str(config.OUTPUT_DIR)]) and None, s_folder, None)
+            app.load(lambda sl, f, *w: (story_info(sl), *clips_info(f), *refresh_wm(f, *w)),
+                     [s_story, s_clips, *wm_inputs], [s_info, s_clips_md, s_clips_gal, s_prev_l, s_prev_v, s_tpl_gal])
 
         # ---------------- Lịch tự động ----------------
         with gr.Tab("⏰ Lịch tự động"):
@@ -766,7 +1194,8 @@ def build() -> gr.Blocks:
 
 def main():
     scheduler.start_watcher(read_env)
-    build().queue().launch(inbrowser=not os.getenv("PIANOTUBE_NO_BROWSER"), server_port=7860,
+    build().queue().launch(inbrowser=not os.getenv("PIANOTUBE_NO_BROWSER"),
+                           server_port=int(os.getenv("PIANOTUBE_PORT", "7860")),
                            allowed_paths=[str(config.OUTPUT_DIR), str(imaging.BG_DIR)],
                            theme=gr.themes.Soft(primary_hue="indigo"), css=CSS)
 

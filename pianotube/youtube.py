@@ -219,8 +219,12 @@ def upload(folder: Path, privacy: str = "private", publish_at: datetime | None =
     if publish_at:
         status["privacyStatus"] = "private"
         status["publishAt"] = to_utc(publish_at)
+    # Video cũ ghi category "Music" (chữ) → chỉ nhận mã số, còn lại dùng mặc định Âm nhạc.
+    cat = str(meta.get("category", ""))
+    lang = meta.get("language", "en")
     body = {"snippet": {"title": title, "description": desc, "tags": tags,
-                        "categoryId": MUSIC_CATEGORY, "defaultLanguage": "en"},
+                        "categoryId": cat if cat.isdigit() else MUSIC_CATEGORY,
+                        "defaultLanguage": lang, "defaultAudioLanguage": lang},
             "status": status}
 
     yt = service(account_id, log)

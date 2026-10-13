@@ -21,6 +21,11 @@ DEFAULTS = {
     "auto_effect": "grain",
     "auto_upload": True,
     "auto_mode": "slot",         # cách đăng: slot | private | unlisted | public
+    # Truyện audio
+    "story_dir": "",             # thư mục truyện (trống = story.source.STORY_DIR)
+    "story_clips_dir": "",       # thư mục video nền lần trước
+    "story_voice": "Giọng của tôi",
+    "story_wm": {},              # cấu hình watermark lần trước
 }
 
 
